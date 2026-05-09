@@ -1,6 +1,6 @@
 [project]
 name = "ds-review"
-version = "0.1.1"
+version = "0.1.2"
 description = "Blackgeorge + DeepSeek-V4 PR Review Bot"
 requires-python = ">=3.12"
 dependencies = [

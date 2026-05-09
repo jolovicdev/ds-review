@@ -69,7 +69,7 @@ jobs:
       )
     steps:
       - name: DS-Review
-        uses: jolovicdev/ds-review@v0.1.1
+        uses: jolovicdev/ds-review@v0.1.2
         with:
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -87,6 +87,8 @@ If you enable `check_runs_enabled = true`, add `checks: write` to the workflow p
 
 For public repositories, the normal `pull_request` event does not expose repository secrets to untrusted fork PRs. That is the safer default. Avoid switching this workflow to `pull_request_target` unless you understand the security tradeoff.
 Comment-triggered reviews are gated to `OWNER`, `MEMBER`, and `COLLABORATOR` by default so random issue commenters cannot burn your model budget.
+
+Privacy: DS-Review sends selected PR context to DeepSeek for review, including private repository code when enabled on private repositories. It does not intentionally log secrets, tokens, prompts, full diffs, or model responses. See [PRIVACY.md](./PRIVACY.md).
 
 ### Path B: Self-hosted GitHub App (Docker)
 
@@ -403,11 +405,11 @@ only.
 
 ## Release
 
-The current release is tagged `v0.1.1`. For future releases:
+The current release is tagged `v0.1.2`. For future releases:
 
 ```bash
-git tag -a v0.1.2 -m "v0.1.2"
-git push origin v0.1.2
+git tag -a v0.1.3 -m "v0.1.3"
+git push origin v0.1.3
 ```
 
 Prefer version tags in examples and production installs. Keep `@master` only for bleeding-edge testing.
