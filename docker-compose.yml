@@ -1,0 +1,10 @@
+services:
+  ds-review:
+    build: .
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./.secrets.toml:/app/.secrets.toml:ro
+      - ./.blackgeorge:/app/.blackgeorge
+    restart: unless-stopped
+    command: src.main

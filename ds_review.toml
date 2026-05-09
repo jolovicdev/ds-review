@@ -1,0 +1,37 @@
+# DS-Review default configuration — committed to version control.
+# User overrides go in .secrets.toml (gitignored).
+
+[models]
+fast = "deepseek/deepseek-v4-flash"
+pro = "deepseek/deepseek-v4-pro"
+temperature = 0.0
+
+[server]
+host = "0.0.0.0"
+port = 8765
+
+[pipeline]
+max_evaluators = 15
+log_level = "INFO"
+
+[triggers]
+on_pull_request_open = true
+on_pull_request_sync = true
+on_pull_request_reopen = true
+on_mention = true
+mention_author_associations = ["OWNER", "MEMBER", "COLLABORATOR"]
+
+[auto]
+approve_enabled = false
+approve_no_critical = true
+approve_no_high = true
+
+[review]
+auto_approve_enabled = false
+check_runs_enabled = false
+inline_comments_enabled = true
+summary_comment_enabled = true
+min_severity = "P2"
+max_findings = 12
+require_suggestion_for_p2 = false
+fail_check_on = ["P0"]

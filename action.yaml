@@ -1,0 +1,39 @@
+name: DS-Review
+description: AI-powered PR review bot using DeepSeek + Blackgeorge
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  deepseek_api_key:
+    description: DeepSeek API key
+    required: true
+  github_token:
+    description: GitHub token with PR write access
+    required: true
+    default: ${{ github.token }}
+
+outputs:
+  review_summary:
+    description: The generated review summary text
+  review_comments_count:
+    description: Number of review comments generated
+  review_json:
+    description: Full review output as JSON string
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version-file: ${{ github.action_path }}/.python-version
+    - name: Run DS-Review
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: uv run --frozen python -m src.action_runner
+      env:
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}

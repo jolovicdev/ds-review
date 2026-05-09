@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.blackgeorge/
+*.db
+.env
+.secrets.toml
+*.pem
+dist/
+build/
+*.egg-info/
