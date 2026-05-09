@@ -69,7 +69,7 @@ jobs:
       )
     steps:
       - name: DS-Review
-        uses: jolovicdev/ds-review@v0.1.0
+        uses: jolovicdev/ds-review@v0.1.1
         with:
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -403,11 +403,11 @@ only.
 
 ## Release
 
-The initial release is tagged `v0.1.0`. For future releases:
+The current release is tagged `v0.1.1`. For future releases:
 
 ```bash
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+git tag -a v0.1.2 -m "v0.1.2"
+git push origin v0.1.2
 ```
 
 Prefer version tags in examples and production installs. Keep `@master` only for bleeding-edge testing.

@@ -11,15 +11,13 @@ from gidgethub import sansio
 
 from src.client_factory import make_github_client
 from src.config import settings
+from src.logging_config import configure_logging
 from src.persistent_state import clear_pending, get_pending_reviews, save_pending_review
 from src.pipeline import _is_recheck_request, handle_comment_reply, run_review_pipeline
 from src.review_queue import IsCurrent, ReviewCoordinator
 from src.trigger_policy import issue_comment_can_trigger_review, review_comment_can_trigger_reply
 
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+configure_logging()
 logger = logging.getLogger("ds-review")
 
 
@@ -37,7 +35,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="DS-Review", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="DS-Review", version="0.1.1", lifespan=lifespan)
 
 
 def verify_hmac(body: bytes, signature_header: str | None) -> bool:

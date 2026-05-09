@@ -16,13 +16,11 @@ import sys
 from typing import NoReturn
 
 from src.config import settings
+from src.logging_config import configure_logging
 from src.pipeline import run_review_pipeline
 from src.trigger_policy import issue_comment_can_trigger_review
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] DS-Review: %(message)s",
-)
+configure_logging(action_mode=True)
 logger = logging.getLogger("ds-review.action")
 
 

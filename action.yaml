@@ -26,6 +26,9 @@ runs:
   steps:
     - name: Set up uv
       uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: false
+        ignore-empty-workdir: true
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
