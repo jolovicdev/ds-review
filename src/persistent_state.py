@@ -21,14 +21,12 @@ def get_pr_state(repo: str, pr_number: int) -> dict:
     return _load().get(key, {})
 
 
-def save_review(repo: str, pr_number: int, review_id: int, commit_sha: str, summary_comment_id: int = 0) -> None:
+def save_review(repo: str, pr_number: int, review_id: int, commit_sha: str) -> None:
     state = _load()
     key = f"{repo}#{pr_number}"
     entry = state.get(key, {})
     entry["review_id"] = review_id
     entry["last_commit_sha"] = commit_sha
-    if summary_comment_id:
-        entry["summary_comment_id"] = summary_comment_id
     entry["updated_at"] = datetime.now(UTC).isoformat()
     state[key] = entry
     _save(state)

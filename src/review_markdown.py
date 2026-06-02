@@ -355,12 +355,3 @@ def verdict_line(highest: str, count: int) -> str:
     if highest in {"P0", "P1", "P2"}:
         return f"Request changes - {count} actionable {noun}, highest severity {highest}."
     return f"Comment - {count} low-priority {noun}."
-
-
-def _finding_parts(body: str) -> tuple[str, str]:
-    cleaned = strip_severity_prefix(body)
-    cleaned = _SUGGESTION_RE.sub("", cleaned).strip()
-    cleaned = re.sub(r"```.*?```", "", cleaned, flags=re.DOTALL).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    title, details = split_title_and_details(cleaned)
-    return title, details or cleaned

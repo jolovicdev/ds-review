@@ -118,21 +118,6 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
     async def fetch_recent_related_prs(repo_full_name: str, changed_files: list[str]) -> str:
         return await client.get_recent_prs(repo_full_name, changed_files, token)
 
-    @tool(description="Post a PR review with summary and inline comments to GitHub.")
-    async def post_review(repo_full_name: str, pr_number: int, summary: str, comments: list) -> dict:
-        clean = [{"path": c["path"], "line": c.get("line", 1), "side": "RIGHT", "body": c["body"]} for c in comments]
-        return await client.post_review(repo_full_name, pr_number, summary, clean, token)
-
-    @tool(description="Create a GitHub Check Run with review conclusion. conclusion: success/neutral/failure")
-    async def create_check_run(
-        repo_full_name: str, pr_number: int, head_sha: str, summary: str, conclusion: str
-    ) -> dict:
-        return await client.create_check_run(repo_full_name, pr_number, head_sha, summary, conclusion, token)
-
-    @tool(description="Auto-approve PR when no critical or high-severity issues found")
-    async def approve_pr(repo_full_name: str, pr_number: int) -> dict:
-        return await client.approve_pr(repo_full_name, pr_number, token)
-
     return [
         fetch_pr_details,
         fetch_changed_file,
@@ -140,7 +125,4 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
         fetch_related_files,
         fetch_repo_guidelines,
         fetch_recent_related_prs,
-        post_review,
-        create_check_run,
-        approve_pr,
     ]

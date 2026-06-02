@@ -232,9 +232,7 @@ async def run_review_pipeline(
             logger.info(f"Incremental: {len(new_commits)} new commits for {repo_full_name}#{pr_number}")
 
     tools = make_tools(client, token, pr_details=pr_data)
-    context_tools = tools[:6]
-
-    context_collector = build_context_collector(context_tools)
+    context_collector = build_context_collector(tools)
     hypothesis_generator = build_hypothesis_generator()
     evaluator = build_evaluator()
     specialist_workforce = build_specialist_workforce()
