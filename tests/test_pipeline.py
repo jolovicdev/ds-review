@@ -11,6 +11,7 @@ from src.pipeline import (
     _is_our_review_body,
     _parse_diff_changed_lines,
     _parse_diff_line_ranges,
+    _reconcile_inline_comments,
     _review_event,
     _review_head_is_current,
     _split_review_comments,
@@ -481,6 +482,30 @@ class TestInlineCommentDedup:
         a = {"path": "src/app.py", "line": 10, "side": "RIGHT"}
         b = {"path": "src/app.py", "line": 11, "side": "RIGHT"}
         assert _inline_comment_key(a) != _inline_comment_key(b)
+
+
+class TestReconcileInlineComments:
+    def test_unchanged_finding_is_left_in_place(self):
+        existing = [{"id": 1, "path": "a.py", "line": 18, "side": "RIGHT"}]
+        review = [{"path": "a.py", "line": 18, "side": "RIGHT", "body": "reworded"}]
+        to_delete, to_post = _reconcile_inline_comments(existing, review, set())
+        assert to_delete == []
+        assert to_post == []
+
+    def test_anchor_drift_deletes_stale_and_posts_new(self):
+        # Same bug, model re-anchors from line 21 to 18 on the re-run.
+        existing = [{"id": 1, "path": "a.py", "line": 21, "side": "RIGHT"}]
+        review = [{"path": "a.py", "line": 18, "side": "RIGHT", "body": "x"}]
+        to_delete, to_post = _reconcile_inline_comments(existing, review, set())
+        assert to_delete == [1]
+        assert to_post == review
+
+    def test_comment_with_developer_reply_is_protected(self):
+        existing = [{"id": 1, "path": "a.py", "line": 21, "side": "RIGHT"}]
+        review = [{"path": "a.py", "line": 18, "side": "RIGHT", "body": "x"}]
+        to_delete, to_post = _reconcile_inline_comments(existing, review, {1})
+        assert to_delete == []
+        assert to_post == review
 
 
 class TestOurReviewDetection:

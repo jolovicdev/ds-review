@@ -94,18 +94,6 @@ async def _discover_existing_reviews(client: GitHubClient, repo: str, pr_number:
     return our_reviews
 
 
-async def _get_our_review_comments(
-    client: GitHubClient, repo: str, pr_number: int, our_review_ids: set[int], token: str
-) -> list[dict]:
-    """Return review comments that belong to our reviews."""
-    try:
-        all_comments = await client.list_review_comments(repo, pr_number, token)
-    except Exception:
-        logger.warning("Failed to list review comments")
-        return []
-    return [c for c in all_comments if c.get("pull_request_review_id") in our_review_ids]
-
-
 def _inline_comment_key(comment: dict) -> tuple[str, int | None, str]:
     """Identity for an inline comment, stable across re-reviews even if wording changes.
 
@@ -114,6 +102,31 @@ def _inline_comment_key(comment: dict) -> tuple[str, int | None, str]:
     """
     line = comment.get("line") or comment.get("original_line")
     return comment.get("path", ""), line, comment.get("side") or "RIGHT"
+
+
+def _reconcile_inline_comments(
+    existing_ours: list[dict],
+    review_comments: list[dict],
+    protected_comment_ids: set[int],
+) -> tuple[list[int], list[dict]]:
+    """Plan the inline-comment changes for a re-review.
+
+    Returns the ids of our stale comments to delete (a finding we no longer report,
+    and which no developer has replied to) and the genuinely new comments to post.
+    Comments whose (path, line, side) still matches a current finding are left in
+    place so their threads and resolved state survive the re-review.
+    """
+    existing_by_key: dict[tuple[str, int | None, str], dict] = {}
+    for comment in existing_ours:
+        existing_by_key.setdefault(_inline_comment_key(comment), comment)
+    desired_keys = {_inline_comment_key(c) for c in review_comments}
+    to_delete = [
+        comment["id"]
+        for key, comment in existing_by_key.items()
+        if key not in desired_keys and comment.get("id") not in protected_comment_ids
+    ]
+    to_post = [c for c in review_comments if _inline_comment_key(c) not in existing_by_key]
+    return to_delete, to_post
 
 
 def _write_github_output(review_output: dict) -> None:
@@ -474,13 +487,24 @@ async def run_review_pipeline(
                     len(review_comments),
                 )
 
-            # For inline comments: only post genuinely new ones to avoid duplicates
+            # Reconcile inline comments: drop ours that no longer match a finding,
+            # keep the ones still current, and post only genuinely new ones.
             if review_comments and existing_summary_review and not should_replace_review_state:
-                existing_comments = await _get_our_review_comments(
-                    client, repo_full_name, pr_number, our_review_ids, token
-                )
-                existing_keys = {_inline_comment_key(c) for c in existing_comments}
-                new_comments = [c for c in review_comments if _inline_comment_key(c) not in existing_keys]
+                try:
+                    all_comments = await client.list_review_comments(repo_full_name, pr_number, token)
+                except Exception:
+                    logger.warning("Failed to list review comments for reconciliation")
+                    all_comments = []
+                reply_parents = {c["in_reply_to_id"] for c in all_comments if c.get("in_reply_to_id")}
+                existing_ours = [c for c in all_comments if c.get("pull_request_review_id") in our_review_ids]
+                stale_ids, new_comments = _reconcile_inline_comments(existing_ours, review_comments, reply_parents)
+                for comment_id in stale_ids:
+                    try:
+                        await client.delete_review_comment(repo_full_name, comment_id, token)
+                    except Exception:
+                        logger.warning("Failed to delete stale inline comment %s", comment_id)
+                if stale_ids:
+                    logger.info(f"Removed {len(stale_ids)} stale inline comments")
                 if new_comments:
                     await client.post_review_with_fallback(
                         repo_full_name, pr_number, INLINE_MARKER, new_comments, token

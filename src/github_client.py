@@ -387,6 +387,13 @@ class GitHubClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def delete_review_comment(self, repo: str, comment_id: int, token: str) -> None:
+        resp = await self._client.delete(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/comments/{comment_id}",
+            headers=self._auth(token),
+        )
+        resp.raise_for_status()
+
     async def reply_to_review_comment(self, repo: str, pr_number: int, comment_id: int, body: str, token: str) -> dict:
         resp = await self._client.post(
             f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
