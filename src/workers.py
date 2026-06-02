@@ -206,8 +206,9 @@ def build_reflector():
 
 You receive the review summary, inline comments, and PR context. Verify:
 
-1. LINE NUMBERS: check each referenced line against the actual file content.
-   Fix any that are wrong.
+1. LINE NUMBERS: cross-check each referenced line against the diff and file
+   context provided in pr_context. If a referenced line is not among the changed
+   lines shown there, correct it to the right changed line or drop the finding.
 2. FALSE POSITIVES: remove comments that are clearly incorrect or based on
    misunderstanding the code.
 3. TONE: rewrite anything that sounds accusatory, harsh, or condescending.

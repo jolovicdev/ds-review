@@ -1,48 +1,31 @@
-import re
-
 from blackgeorge.tools import tool
 
+from src.diff_utils import parse_diff
 from src.github_client import GitHubClient
+
+_DIFF_HEADER = (
+    "Use R line numbers marked with '+' for ReviewComment.line when the issue is in added or replaced code. "
+    "Use L line numbers marked with '-' and ReviewComment.side='LEFT' only when the deletion itself caused the "
+    "issue. Do not anchor review comments to hunk headers or unchanged context lines."
+)
 
 
 def _extract_file_diff(diff: str, target_path: str) -> str:
-    lines = diff.split("\n")
-    result = []
-    in_target = False
-    old_line = 0
-    new_line = 0
-    for line in lines:
-        if line.startswith("+++ b/") and line[6:] == target_path:
-            in_target = True
-            result.append(f"--- {target_path}")
-            continue
-        if in_target:
-            if line.startswith("diff ") or (line.startswith("--- ") and not line.startswith("--- /dev/null")):
-                break
-            if line.startswith("@@"):
-                match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-                if match:
-                    old_line = int(match.group(1))
-                    new_line = int(match.group(2))
-                result.append(line)
-            elif line.startswith("+") and not line.startswith("+++"):
-                result.append(f"R{new_line} + {line[1:]}")
-                new_line += 1
-            elif line.startswith("-") and not line.startswith("---"):
-                result.append(f"L{old_line} - {line[1:]}")
-                old_line += 1
-            elif line.startswith(" "):
-                result.append(f"R{new_line}   {line[1:]}")
-                old_line += 1
-                new_line += 1
-    if not result:
+    diff_lines = parse_diff(diff).get(target_path, [])
+    result = [_DIFF_HEADER]
+    if not diff_lines:
         result.append(f"(no diff hunks for {target_path})")
-    result.insert(
-        0,
-        "Use R line numbers marked with '+' for ReviewComment.line when the issue is in added or replaced code. "
-        "Use L line numbers marked with '-' and ReviewComment.side='LEFT' only when the deletion itself caused the "
-        "issue. Do not anchor review comments to hunk headers or unchanged context lines.",
-    )
+        return "\n".join(result)
+    result.append(f"--- {target_path}")
+    for dl in diff_lines:
+        if dl.kind == "add":
+            result.append(f"R{dl.number} + {dl.text}")
+        elif dl.kind == "del":
+            result.append(f"L{dl.number} - {dl.text}")
+        elif dl.kind == "context":
+            result.append(f"R{dl.number}   {dl.text}")
+        else:  # hunk header
+            result.append(dl.text)
     return "\n".join(result)
 
 

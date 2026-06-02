@@ -1,10 +1,14 @@
 from src.models import ReviewComment, ReviewCommentList, ReviewOutput
 from src.pipeline import (
+    DS_REVIEW_MARKER,
+    INLINE_MARKER,
     _check_run_conclusion,
     _extract_context,
     _extract_review_output_from_flow,
     _get_data_as_list,
+    _inline_comment_key,
     _is_line_in_diff,
+    _is_our_review_body,
     _parse_diff_changed_lines,
     _parse_diff_line_ranges,
     _review_event,
@@ -461,6 +465,32 @@ class TestDataExtraction:
         ]
         result = _extract_review_output_from_flow(FakeReport(data=flow_data))
         assert result is None
+
+
+class TestInlineCommentDedup:
+    def test_key_is_stable_when_only_wording_changes(self):
+        a = {"path": "src/app.py", "line": 10, "side": "RIGHT", "body": "Original wording"}
+        b = {"path": "src/app.py", "line": 10, "side": "RIGHT", "body": "Reworded by the model"}
+        assert _inline_comment_key(a) == _inline_comment_key(b)
+
+    def test_key_falls_back_to_original_line_and_default_side(self):
+        github_comment = {"path": "src/app.py", "line": None, "original_line": 10}
+        assert _inline_comment_key(github_comment) == ("src/app.py", 10, "RIGHT")
+
+    def test_distinct_lines_do_not_collide(self):
+        a = {"path": "src/app.py", "line": 10, "side": "RIGHT"}
+        b = {"path": "src/app.py", "line": 11, "side": "RIGHT"}
+        assert _inline_comment_key(a) != _inline_comment_key(b)
+
+
+class TestOurReviewDetection:
+    def test_matches_our_hidden_markers(self):
+        assert _is_our_review_body("Some summary" + DS_REVIEW_MARKER)
+        assert _is_our_review_body(f"prefix {INLINE_MARKER}")
+
+    def test_does_not_match_human_review_mentioning_ds_review(self):
+        assert not _is_our_review_body("I ran DS-Review locally and it looks good")
+        assert not _is_our_review_body("ordinary human review comment")
 
 
 class FakeReport:

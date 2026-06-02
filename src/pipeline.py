@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 
 from src.client_factory import make_github_client
 from src.config import settings
+from src.diff_utils import parse_diff
 from src.github_client import GitHubClient
 from src.models import (
     ConversationReply,
@@ -62,6 +63,11 @@ def _format_flow_errors(errors) -> str:
     return "; ".join(str(error) for error in errors)
 
 
+def _is_our_review_body(body: str) -> bool:
+    """True when a review body carries one of our hidden DS-Review markers."""
+    return DS_REVIEW_MARKER.strip() in body or INLINE_MARKER in body
+
+
 async def _discover_existing_reviews(client: GitHubClient, repo: str, pr_number: int, token: str) -> list[dict]:
     """Return DS-Review reviews on this PR by inspecting author + body markers."""
     try:
@@ -83,7 +89,7 @@ async def _discover_existing_reviews(client: GitHubClient, repo: str, pr_number:
         login = user.get("login", "")
         if bot_login and login == bot_login:
             our_reviews.append(r)
-        elif DS_REVIEW_MARKER.strip() in body or INLINE_MARKER in body or "DS-Review" in body:
+        elif _is_our_review_body(body):
             our_reviews.append(r)
     return our_reviews
 
@@ -98,6 +104,16 @@ async def _get_our_review_comments(
         logger.warning("Failed to list review comments")
         return []
     return [c for c in all_comments if c.get("pull_request_review_id") in our_review_ids]
+
+
+def _inline_comment_key(comment: dict) -> tuple[str, int | None, str]:
+    """Identity for an inline comment, stable across re-reviews even if wording changes.
+
+    Works for both our outgoing comments and GitHub's review-comment payloads, where an
+    outdated comment exposes its position as `original_line` rather than `line`.
+    """
+    line = comment.get("line") or comment.get("original_line")
+    return comment.get("path", ""), line, comment.get("side") or "RIGHT"
 
 
 def _write_github_output(review_output: dict) -> None:
@@ -430,7 +446,7 @@ async def run_review_pipeline(
             existing_summary_review = None
             for r in our_reviews:
                 body = r.get("body", "")
-                if DS_REVIEW_MARKER.strip() in body or ("DS-Review" in body and INLINE_MARKER not in body):
+                if DS_REVIEW_MARKER.strip() in body and INLINE_MARKER not in body:
                     existing_summary_review = r
                     break
 
@@ -463,8 +479,8 @@ async def run_review_pipeline(
                 existing_comments = await _get_our_review_comments(
                     client, repo_full_name, pr_number, our_review_ids, token
                 )
-                existing_keys = {(c["path"], c["body"]) for c in existing_comments}
-                new_comments = [c for c in review_comments if (c["path"], c["body"]) not in existing_keys]
+                existing_keys = {_inline_comment_key(c) for c in existing_comments}
+                new_comments = [c for c in review_comments if _inline_comment_key(c) not in existing_keys]
                 if new_comments:
                     await client.post_review_with_fallback(
                         repo_full_name, pr_number, INLINE_MARKER, new_comments, token
@@ -724,56 +740,17 @@ def _merge_summary_comments(existing: dict, incoming: dict) -> dict:
     return merged
 
 
-def _clean_diff_path(path: str) -> str:
-    path = path.split("\t", 1)[0].strip()
-    if path == "/dev/null":
-        return ""
-    if path.startswith("a/") or path.startswith("b/"):
-        return path[2:]
-    return path
-
-
-def _parse_hunk_start(header: str) -> tuple[int, int] | None:
-    match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", header)
-    if match is None:
-        return None
-    return int(match.group(1)), int(match.group(2))
-
-
 def _parse_diff_changed_lines(diff: str) -> dict[str, dict[str, dict[int, str]]]:
     """Return changed line numbers grouped by GitHub review side."""
     lines_by_file: dict[str, dict[str, dict[int, str]]] = {}
-    current_file = ""
-    old_path = ""
-    old_line = 0
-    new_line = 0
-    for line in diff.split("\n"):
-        if line.startswith("diff --git "):
-            current_file = ""
-            old_path = ""
-            old_line = 0
-            new_line = 0
-        elif line.startswith("--- "):
-            old_path = _clean_diff_path(line[4:])
-        elif line.startswith("+++ "):
-            new_path = _clean_diff_path(line[4:])
-            current_file = new_path or old_path
-            if current_file:
-                lines_by_file.setdefault(current_file, {"RIGHT": {}, "LEFT": {}})
-        elif line.startswith("@@") and current_file:
-            hunk_start = _parse_hunk_start(line)
-            if hunk_start is not None:
-                old_line, new_line = hunk_start
-        elif current_file and (old_line > 0 or new_line > 0):
-            if line.startswith("+") and not line.startswith("+++"):
-                lines_by_file[current_file]["RIGHT"][new_line] = line[1:]
-                new_line += 1
-            elif line.startswith("-") and not line.startswith("---"):
-                lines_by_file[current_file]["LEFT"][old_line] = line[1:]
-                old_line += 1
-            elif line.startswith(" "):
-                old_line += 1
-                new_line += 1
+    for path, diff_lines in parse_diff(diff).items():
+        sides: dict[str, dict[int, str]] = {"RIGHT": {}, "LEFT": {}}
+        for dl in diff_lines:
+            if dl.kind == "add":
+                sides["RIGHT"][dl.number] = dl.text
+            elif dl.kind == "del":
+                sides["LEFT"][dl.number] = dl.text
+        lines_by_file[path] = sides
     return lines_by_file
 
 
