@@ -42,7 +42,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="DS-Review", version="0.1.2", lifespan=lifespan)
+app = FastAPI(title="DS-Review", version="0.1.3", lifespan=lifespan)
 
 
 def verify_hmac(body: bytes, signature_header: str | None) -> bool:
