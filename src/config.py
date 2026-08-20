@@ -59,7 +59,6 @@ class Settings:
         self.temperature = _float_env_or(base, "models", "temperature", "DS_REVIEW_TEMPERATURE", 0.0)
 
         self.log_level = pipeline.get("log_level", "INFO")
-        self.max_evaluators = pipeline.get("max_evaluators", 15)
 
         self.deployment_type = os.environ.get("DEPLOYMENT_TYPE") or gh.get("deployment_type", "app")
         if os.environ.get("GITHUB_ACTIONS"):
@@ -72,7 +71,6 @@ class Settings:
 
         self.server_host = server.get("host", "0.0.0.0")
         self.server_port = server.get("port", 8765)
-        self.smee_proxy_url = gh.get("smee_proxy_url", "")
 
         # Triggers
         triggers = base.get("triggers", {})

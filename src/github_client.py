@@ -140,8 +140,6 @@ SKIP_FILENAMES = {
 
 SKIP_SUFFIXES = (".map", ".min.css", ".min.js", ".snap")
 
-MAX_CODEBASE_CHARS = 200_000
-
 
 def is_skipped_repo_path(path: str) -> bool:
     posix_path = PurePosixPath(path)
@@ -269,34 +267,6 @@ class GitHubClient:
         )
         resp.raise_for_status()
         return resp.json().get("tree", [])
-
-    async def get_full_codebase(self, repo: str, ref: str, token: str) -> str:
-        tree = await self.get_repo_tree(repo, ref, token)
-        parts: list[str] = []
-        total = 0
-
-        for entry in tree:
-            if entry["type"] != "blob":
-                continue
-            path = entry["path"]
-            if not is_reviewable_source_path(path):
-                continue
-
-            content = await self.get_file_content(repo, path, ref, token)
-            if content is None:
-                continue
-            if len(content) > 50_000:
-                content = content[:50_000] + "\n# ... [truncated]"
-
-            chunk = f"\n--- {path} ---\n{content}\n"
-            if total + len(chunk) > MAX_CODEBASE_CHARS:
-                parts.append(chunk[: MAX_CODEBASE_CHARS - total])
-                parts.append("\n# ... [remaining files truncated]")
-                break
-            parts.append(chunk)
-            total += len(chunk)
-
-        return "".join(parts)
 
     async def get_guidelines(self, repo: str, token: str, ref: str = "HEAD") -> str | None:
         for path in ["CONTEXT.md", "CONTRIBUTING.md", "README.md"]:
