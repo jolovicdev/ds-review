@@ -83,22 +83,28 @@ def _last_reviewed_commit_from_reviews(reviews: list[dict]) -> str:
 
 
 def _carry_forward_comments(existing_comments: list[dict], retouched_files: set[str]) -> list[dict]:
-    """Previous inline findings on files this incremental review does not touch again."""
-    carried = []
+    """Previous inline findings on files this incremental review does not touch again.
+
+    Near-duplicate comments that earlier runs left on the same anchor are
+    collapsed to the most severe one.
+    """
+    by_anchor: dict[tuple[str, int, str], dict] = {}
     for c in existing_comments:
         path = c.get("path", "")
         if not path or path in retouched_files:
             continue
-        carried.append(
-            {
-                "path": path,
-                "line": c.get("line") or c.get("original_line") or 1,
-                "side": c.get("side", "RIGHT"),
-                "body": c.get("body", ""),
-                "severity": severity_marker(None, c.get("body", "")),
-            }
-        )
-    return carried
+        entry = {
+            "path": path,
+            "line": c.get("line") or c.get("original_line") or 1,
+            "side": c.get("side", "RIGHT"),
+            "body": c.get("body", ""),
+            "severity": severity_marker(None, c.get("body", "")),
+        }
+        key = (entry["path"], entry["line"], entry["side"])
+        current = by_anchor.get(key)
+        if current is None or _severity_rank(entry) < _severity_rank(current):
+            by_anchor[key] = entry
+    return list(by_anchor.values())
 
 
 def _context_file_coverage(report, changed_files: list[str]) -> tuple[int, int] | None:

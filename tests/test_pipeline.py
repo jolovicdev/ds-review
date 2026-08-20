@@ -781,3 +781,17 @@ class TestDeskBudgetScaling:
     async def test_budget_hits_hard_ceiling(self, monkeypatch, tmp_path):
         budgets = await self._run_with_files(monkeypatch, tmp_path, 400)
         assert budgets["max_tool_calls"] == 120
+
+    def test_carry_forward_collapses_same_anchor_to_most_severe(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [
+            {"path": "src/old.py", "line": 7, "body": '<img alt="P2 Medium" src="x"> **Noise**'},
+            {"path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'},
+            {"path": "src/old.py", "line": 9, "body": '<img alt="P0 Critical" src="x"> **Worse**'},
+        ]
+
+        carried = _carry_forward_comments(existing, set())
+
+        anchors = [(c["path"], c["line"], c["severity"]) for c in carried]
+        assert anchors == [("src/old.py", 7, "P1"), ("src/old.py", 9, "P0")]
