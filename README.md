@@ -1,10 +1,10 @@
 # DS-Review
 
-AI-powered PR review bot built on [Blackgeorge](https://jolovicdev.github.io/blackgeorge/) + DeepSeek-V4.
+Self-hosted AI code reviewer for GitHub pull requests, powered by [Blackgeorge](https://jolovicdev.github.io/blackgeorge/) and DeepSeek-V4.
 
-DS-Review starts from the PR diff, pulls in related code and repo guidance for context, and publishes only findings it can tie back to changed lines.
+DS-Review reviews what changed and why it matters. It starts from the PR diff, pulls in related code and repo guidance for context, and publishes only findings it can tie back to changed lines. Run it as a composite GitHub Action or as your own self-hosted GitHub App webhook server.
 
-Posts reviews as `@ds-review[bot]` with severity-marked inline comments and `suggestion` code blocks.
+Posts reviews as `@ds-review[bot]` with severity badges (P0–P2), inline comments anchored to changed lines, and applyable `suggestion` code blocks.
 
 DS-Review is BYOK: bring your own DeepSeek API key. This repository does not provide a hosted review service.
 
@@ -69,7 +69,7 @@ jobs:
       )
     steps:
       - name: DS-Review
-        uses: jolovicdev/ds-review@v0.1.2
+        uses: jolovicdev/ds-review@v0.1.3
         with:
           deepseek_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -222,7 +222,6 @@ private_key = """               # app mode: paste full PEM block
 -----BEGIN RSA PRIVATE KEY-----
 ...
 -----END RSA PRIVATE KEY-----"""
-smee_proxy_url = ""             # app dev: https://smee.io/your-channel
 ```
 
 Environment variables override TOML values. In GitHub Actions, `DEEPSEEK_API_KEY` and `GITHUB_TOKEN` are read from `secrets` and the environment directly.
@@ -405,7 +404,7 @@ only.
 
 ## Release
 
-The current release is tagged `v0.1.2`. For future releases:
+The current release is tagged `v0.1.3`. For future releases:
 
 ```bash
 git tag -a v0.1.3 -m "v0.1.3"
