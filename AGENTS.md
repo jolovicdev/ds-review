@@ -36,5 +36,4 @@ uv run ruff format src/ tests/
 
 - Never commit `.secrets.toml`, private keys, `.env`, `.blackgeorge/`, local DBs, pycache, or virtualenv files.
 - Do not weaken webhook HMAC verification.
-- Do not raise `max_evaluators` above 15 without explicit maintainer approval.
 - Comment-triggered reviews should remain gated by trusted GitHub author associations unless the maintainer explicitly opts out.

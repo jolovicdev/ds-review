@@ -28,7 +28,7 @@ When you report a line number, use an R line number marked with `+` for added or
 Use an L line number marked with `-` only when the deletion itself caused the issue.
 Use full files, related files, docs, and recent PRs only to understand contracts that the changed lines affect.
 Never turn unchanged code into a finding by itself.""",
-        tools=tools[:6],
+        tools=tools,
     )
 
 

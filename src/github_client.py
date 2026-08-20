@@ -2,6 +2,7 @@ import base64
 import logging
 import time
 from pathlib import PurePosixPath
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -139,8 +140,6 @@ SKIP_FILENAMES = {
 
 SKIP_SUFFIXES = (".map", ".min.css", ".min.js", ".snap")
 
-MAX_CODEBASE_CHARS = 200_000
-
 
 def is_skipped_repo_path(path: str) -> bool:
     posix_path = PurePosixPath(path)
@@ -240,6 +239,7 @@ class GitHubClient:
         return {
             "title": pr["title"],
             "body": pr.get("body") or "",
+            "author_login": pr.get("user", {}).get("login", ""),
             "diff": diff_resp.text,
             "files": files,
             "base_ref": pr["base"]["ref"],
@@ -248,8 +248,9 @@ class GitHubClient:
 
     async def get_file_content(self, repo: str, path: str, ref: str, token: str) -> str | None:
         resp = await self._client.get(
-            f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}?ref={ref}",
+            f"{GITHUB_API_BASE}/repos/{repo}/contents/{quote(path, safe='/')}",
             headers=self._auth(token),
+            params={"ref": ref},
         )
         if resp.status_code != 200:
             return None
@@ -266,34 +267,6 @@ class GitHubClient:
         )
         resp.raise_for_status()
         return resp.json().get("tree", [])
-
-    async def get_full_codebase(self, repo: str, ref: str, token: str) -> str:
-        tree = await self.get_repo_tree(repo, ref, token)
-        parts: list[str] = []
-        total = 0
-
-        for entry in tree:
-            if entry["type"] != "blob":
-                continue
-            path = entry["path"]
-            if not is_reviewable_source_path(path):
-                continue
-
-            content = await self.get_file_content(repo, path, ref, token)
-            if content is None:
-                continue
-            if len(content) > 50_000:
-                content = content[:50_000] + "\n# ... [truncated]"
-
-            chunk = f"\n--- {path} ---\n{content}\n"
-            if total + len(chunk) > MAX_CODEBASE_CHARS:
-                parts.append(chunk[: MAX_CODEBASE_CHARS - total])
-                parts.append("\n# ... [remaining files truncated]")
-                break
-            parts.append(chunk)
-            total += len(chunk)
-
-        return "".join(parts)
 
     async def get_guidelines(self, repo: str, token: str, ref: str = "HEAD") -> str | None:
         for path in ["CONTEXT.md", "CONTRIBUTING.md", "README.md"]:
@@ -472,9 +445,7 @@ class GitHubClient:
             raise RuntimeError(f"GitHub GraphQL error: {data['errors']}")
         return data.get("data", {})
 
-    async def find_review_thread(
-        self, repo: str, pr_number: int, comment_id: int, token: str
-    ) -> dict | None:
+    async def _iter_review_threads(self, repo: str, pr_number: int, token: str):
         owner, name = repo.split("/", 1)
         after = None
         query = """
@@ -505,16 +476,36 @@ class GitHubClient:
             pr_data = repo_data.get("pullRequest") or {}
             threads = pr_data.get("reviewThreads") or {}
             for thread in threads.get("nodes", []):
-                comment_ids = [
-                    c.get("databaseId")
-                    for c in thread.get("comments", {}).get("nodes", [])
-                ]
-                if comment_id in comment_ids:
-                    return thread
+                yield thread
             page_info = threads.get("pageInfo", {})
             if not page_info.get("hasNextPage"):
-                return None
+                return
             after = page_info.get("endCursor")
+
+    async def get_resolved_comment_ids(self, repo: str, pr_number: int, token: str) -> set[int]:
+        """Ids of review comments that live in resolved threads."""
+        resolved: set[int] = set()
+        for thread in await self._collect_review_threads(repo, pr_number, token):
+            if thread.get("isResolved"):
+                resolved.update(
+                    c.get("databaseId") for c in thread.get("comments", {}).get("nodes", []) if c.get("databaseId")
+                )
+        return resolved
+
+    async def _collect_review_threads(self, repo: str, pr_number: int, token: str) -> list[dict]:
+        return [thread async for thread in self._iter_review_threads(repo, pr_number, token)]
+
+    async def find_review_thread(
+        self, repo: str, pr_number: int, comment_id: int, token: str
+    ) -> dict | None:
+        for thread in await self._collect_review_threads(repo, pr_number, token):
+            comment_ids = [
+                c.get("databaseId")
+                for c in thread.get("comments", {}).get("nodes", [])
+            ]
+            if comment_id in comment_ids:
+                return thread
+        return None
 
     async def resolve_review_thread(self, repo: str, pr_number: int, comment_id: int, token: str) -> bool:
         thread = await self.find_review_thread(repo, pr_number, comment_id, token)
@@ -669,13 +660,34 @@ class GitHubClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def get_commits_between(self, repo: str, base: str, head: str, token: str) -> list[dict]:
+    async def get_incremental_diff(self, repo: str, base: str, head: str, token: str) -> tuple[str, int]:
+        """Return a unified diff of the changes between two commits and the ahead-by count.
+
+        Only a strictly ahead comparison describes the commit range; diverged
+        or behind comparisons return a plain tree diff that would review the
+        wrong scope after a rebase or force push. The compare file list is
+        capped at 300 entries with no reliable truncation flag, so a capped
+        list is treated as unusable.
+        """
         resp = await self._client.get(
             f"{GITHUB_API_BASE}/repos/{repo}/compare/{base}...{head}",
             headers=self._auth(token),
         )
         resp.raise_for_status()
-        return resp.json().get("commits", [])
+        data = resp.json()
+        if data.get("status") != "ahead":
+            raise RuntimeError(f"comparison not strictly ahead: {data.get('status')}")
+        files = data.get("files", [])
+        if len(files) >= 300:
+            raise RuntimeError("compare file list capped at 300 entries")
+        parts = []
+        for entry in files:
+            patch = entry.get("patch")
+            if not patch:
+                continue
+            path = entry["filename"]
+            parts.append(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}")
+        return "\n".join(parts), int(data.get("ahead_by", 0))
 
     def _auth(self, token: str) -> dict:
         return {

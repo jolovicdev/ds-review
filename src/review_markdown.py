@@ -91,19 +91,31 @@ def build_review_summary(
     comments: list[dict],
     unanchored_comments: list[dict],
     pr_title: str,
+    event: str = "REQUEST_CHANGES",
+    carried_comments: list[dict] | None = None,
+    coverage: tuple[int, int] | None = None,
+    incremental_note: str | None = None,
 ) -> str:
-    all_comments = comments + unanchored_comments
+    all_comments = comments + unanchored_comments + (carried_comments or [])
     if not all_comments:
-        return "\n".join(
-            [
-                "## DS-Review",
-                "",
-                "No blocking issues found.",
-                "",
-                "Reviewed the changed diff and related call paths. No actionable bugs, security issues, or meaningful "
-                "performance regressions were found.",
-            ]
-        )
+        lines = [
+            "## DS-Review",
+            "",
+            "No blocking issues found.",
+            "",
+            "Reviewed the changed diff and related call paths. No actionable bugs, security issues, or meaningful "
+            "performance regressions were found.",
+        ]
+        if coverage is not None and coverage[0] < coverage[1]:
+            lines.extend(
+                [
+                    "",
+                    "> [!WARNING]",
+                    f"> Context coverage: per-file diffs fetched for {coverage[0]} of {coverage[1]} changed files.",
+                    "> Findings cover the fetched files only.",
+                ]
+            )
+        return "\n".join(lines)
 
     sorted_comments = sorted(
         all_comments,
@@ -115,19 +127,33 @@ def build_review_summary(
     )
     highest = severity_marker(sorted_comments[0].get("severity"), sorted_comments[0].get("body", ""))
     alert = "[!IMPORTANT]" if highest in {"P0", "P1", "P2"} else "[!WARNING]"
-    verdict = verdict_line(highest, len(sorted_comments))
+    verdict = verdict_line(highest, len(sorted_comments), event)
 
     lines = [
-        "## PR Review",
+        "## DS-Review",
         "",
         f"**PR:** {pr_title or summary_pr_line(generated_summary)}",
         "",
         f"> {alert}",
         f"> **Verdict:** {verdict}",
         "",
-        f"### Findings ({len(sorted_comments)})",
-        "",
     ]
+
+    if incremental_note:
+        lines.extend(
+            [
+                "> [!NOTE]",
+                f"> {incremental_note}",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            f"### Findings ({len(sorted_comments)})",
+            "",
+        ]
+    )
 
     for comment in sorted_comments:
         marker = severity_marker(comment.get("severity"), comment.get("body", ""))
@@ -158,6 +184,16 @@ def build_review_summary(
                 "> [!WARNING]",
                 "> Some findings could not be anchored to changed diff lines, so they were kept here instead of",
                 "> being posted as plain timeline comments.",
+                "",
+            ]
+        )
+
+    if coverage is not None and coverage[0] < coverage[1]:
+        lines.extend(
+            [
+                "> [!WARNING]",
+                f"> Context coverage: per-file diffs fetched for {coverage[0]} of {coverage[1]} changed files.",
+                "> Findings cover the fetched files only.",
                 "",
             ]
         )
@@ -350,10 +386,12 @@ def summary_pr_line(summary: str) -> str:
     return "Review completed."
 
 
-def verdict_line(highest: str, count: int) -> str:
+def verdict_line(highest: str, count: int, event: str = "REQUEST_CHANGES") -> str:
     noun = "finding" if count == 1 else "findings"
-    if highest in {"P0", "P1", "P2"}:
+    if highest in {"P0", "P1", "P2"} and event == "REQUEST_CHANGES":
         return f"Request changes - {count} actionable {noun}, highest severity {highest}."
+    if highest in {"P0", "P1", "P2"}:
+        return f"Comment - {count} actionable {noun}, highest severity {highest}."
     return f"Comment - {count} low-priority {noun}."
 
 

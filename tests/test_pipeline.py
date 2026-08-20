@@ -320,7 +320,7 @@ class TestReviewMarkdown:
             pr_title="fix app crash",
         )
 
-        assert "## PR Review" in summary
+        assert "## DS-Review" in summary
         assert "### Findings (1)" in summary
         assert '<img alt="P1 High"' in summary
         assert "**Handle missing payload before dereferencing it**" in summary
@@ -491,3 +491,453 @@ class FakeHeadClient:
     async def get_pr_details(self, repo, pr_number, token):
         self.calls.append((repo, pr_number, token))
         return {"head_sha": self.head_sha}
+
+
+class TestEffectiveReviewEvent:
+    def test_downgrades_request_changes_on_own_pr(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("REQUEST_CHANGES", "jolovicdev", "jolovicdev") == "COMMENT"
+
+    def test_keeps_request_changes_for_other_authors(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("REQUEST_CHANGES", "jolovicdev", "contributor") == "REQUEST_CHANGES"
+
+    def test_keeps_comment_event_unchanged(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("COMMENT", "jolovicdev", "jolovicdev") == "COMMENT"
+
+
+class TestDeskLifecycle:
+    async def test_desk_is_closed_when_flow_fails(self, monkeypatch, tmp_path):
+        from src import persistent_state as ps
+        from src import pipeline
+
+        monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
+        closed = []
+
+        class StubFlow:
+            async def arun(self, job):
+                raise RuntimeError("flow boom")
+
+        class StubDesk:
+            def __init__(self, **kwargs):
+                pass
+
+            def flow(self, steps, name=None):
+                return StubFlow()
+
+            def close(self):
+                closed.append(True)
+
+        class FakeClient:
+            async def get_token(self, installation_id):
+                return "t"
+
+            async def get_pr_details(self, repo, pr_number, token):
+                return {
+                    "title": "t",
+                    "body": "",
+                    "author_login": "someone",
+                    "diff": "",
+                    "files": [],
+                    "base_ref": "main",
+                    "head_sha": "a" * 40,
+                }
+
+            async def post_review(self, *args, **kwargs):
+                return {"id": 1}
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(pipeline, "make_github_client", lambda: FakeClient())
+        monkeypatch.setattr(pipeline, "Desk", StubDesk)
+
+        result = await pipeline.run_review_pipeline("owner/repo", 7)
+
+        assert result is None
+        assert closed == [True]
+
+
+class TestSummaryVerdictMatchesEvent:
+    def _summary(self, event=None):
+        comments = [
+            {"path": "a.py", "line": 3, "severity": "critical", "title": "t", "details": "d", "body": ""}
+        ]
+        kwargs = {
+            "generated_summary": "s",
+            "comments": comments,
+            "unanchored_comments": [],
+            "pr_title": "P",
+        }
+        if event is not None:
+            kwargs["event"] = event
+        return build_review_summary(**kwargs)
+
+    def test_default_event_requests_changes(self):
+        assert "Request changes - 1 actionable finding" in self._summary()
+
+    def test_downgraded_event_renders_comment_verdict(self):
+        body = self._summary(event="COMMENT")
+        assert "Comment - 1 actionable finding, highest severity P0." in body
+        assert "Request changes" not in body
+
+    def test_low_priority_findings_still_render_comment(self):
+        body = self._summary(event="COMMENT")
+        assert "low-priority" not in body
+
+
+class TestIncrementalHelpers:
+    def test_last_reviewed_commit_prefers_latest_submitted_marker_review(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "PENDING",
+                "commit_id": "pending-sha",
+                "submitted_at": "2026-01-03T00:00:00Z",
+                "body": "",
+            },
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "error-sha",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "body": "Automated PR review encountered an error and could not complete.",
+            },
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "good-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
+            },
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "good-sha"
+
+    def test_last_reviewed_commit_ignores_spoofed_marker_from_other_author(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "contributor"},
+                "state": "COMMENTED",
+                "commit_id": "spoofed-sha",
+                "submitted_at": "2026-01-05T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
+            },
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "real-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
+            },
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "real-sha"
+
+    def test_last_reviewed_commit_requires_bot_login(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "<!-- ds-review -->",
+            }
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "") == ""
+
+    def test_last_reviewed_commit_prefers_marker_head_over_stale_commit_id(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "first-head-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+            }
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "a" * 40
+
+    def test_carry_forward_keeps_untouched_anchor_in_retouched_file(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [{"id": 1, "path": "src/both.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'}]
+        changed_lines = {"src/both.py": {"RIGHT": {50: "edited"}, "LEFT": {}}}
+
+        carried = _carry_forward_comments(existing, changed_lines)
+
+        assert [c["path"] for c in carried] == ["src/both.py"]
+
+    def test_carry_forward_drops_finding_whose_anchor_changed(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [{"id": 1, "path": "src/both.py", "line": 50, "body": '<img alt="P1 High" src="x"> **Bug**'}]
+        changed_lines = {"src/both.py": {"RIGHT": {50: "edited"}, "LEFT": {}}}
+
+        assert _carry_forward_comments(existing, changed_lines) == []
+
+    def test_carry_forward_skips_resolved_threads(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [
+            {"id": 11, "path": "src/a.py", "line": 1, "body": '<img alt="P1 High" src="x"> **Fixed**'},
+            {"id": 22, "path": "src/b.py", "line": 2, "body": '<img alt="P2 Medium" src="x"> **Open**'},
+        ]
+
+        carried = _carry_forward_comments(existing, {}, resolved_comment_ids={11})
+
+        assert [c["path"] for c in carried] == ["src/b.py"]
+
+    def test_context_file_coverage_counts_fetched_changed_files(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "b.py"}, result=None),
+                SimpleNamespace(name="fetch_changed_file", arguments={"path": "c.py"}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "not_changed.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py", "d.py"]) == (3, 4)
+
+    def test_reply_diff_context_targets_one_file(self):
+        from src.pipeline import _reply_diff_context
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+target line",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+other line",
+            ]
+        )
+
+        context = _reply_diff_context(diff, "src/target.py")
+
+        assert "target line" in context
+        assert "other line" not in context
+
+    def test_reply_diff_context_truncates_huge_hunks(self):
+        from src.pipeline import _reply_diff_context
+
+        diff = "+++ b/big.py\n@@ -1,2 +1,3 @@\n base\n+" + "x" * 40_000
+
+        context = _reply_diff_context(diff, "big.py", cap=500)
+
+        assert len(context) < 600
+        assert context.endswith("... [truncated]")
+
+
+class TestSummaryCoverageAndIncremental:
+    def _summary(self, **extra):
+        comments = [
+            {"path": "a.py", "line": 3, "severity": "critical", "title": "t", "details": "d", "body": ""}
+        ]
+        kwargs = {
+            "generated_summary": "s",
+            "comments": comments,
+            "unanchored_comments": [],
+            "pr_title": "P",
+        }
+        kwargs.update(extra)
+        return build_review_summary(**kwargs)
+
+    def test_partial_coverage_renders_warning(self):
+        body = self._summary(coverage=(24, 70))
+        assert "Context coverage: per-file diffs fetched for 24 of 70 changed files." in body
+
+    def test_full_coverage_renders_no_warning(self):
+        body = self._summary(coverage=(70, 70))
+        assert "Context coverage" not in body
+
+    def test_clean_review_with_partial_coverage_still_warns(self):
+        body = build_review_summary(
+            generated_summary="s",
+            comments=[],
+            unanchored_comments=[],
+            pr_title="P",
+            coverage=(3, 9),
+        )
+        assert "No blocking issues found." in body
+        assert "Context coverage" in body
+
+    def test_incremental_note_and_carried_findings_render(self):
+        carried = [{"path": "old.py", "line": 9, "severity": "high", "body": "**Bug** detail"}]
+        body = self._summary(
+            carried_comments=carried,
+            incremental_note="Incremental review of 2 new commit(s) since abc12345.",
+        )
+
+        assert "> [!NOTE]" in body
+        assert "Incremental review of 2 new commit(s) since abc12345." in body
+        assert "### Findings (2)" in body
+
+
+class TestDeskBudgetScaling:
+    async def _run_with_files(self, monkeypatch, tmp_path, file_count):
+        from src import persistent_state as ps
+        from src import pipeline
+
+        monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
+        budgets = {}
+
+        class StubFlow:
+            async def arun(self, job):
+                raise RuntimeError("stop")
+
+        class StubDesk:
+            def __init__(self, **kwargs):
+                budgets["max_tool_calls"] = kwargs["max_tool_calls"]
+                budgets["max_iterations"] = kwargs["max_iterations"]
+
+            def flow(self, steps, name=None):
+                return StubFlow()
+
+            def close(self):
+                pass
+
+        class FakeClient:
+            async def get_token(self, installation_id):
+                return "t"
+
+            async def get_pr_details(self, repo, pr_number, token):
+                return {
+                    "title": "t",
+                    "body": "",
+                    "author_login": "someone",
+                    "diff": "",
+                    "files": [f"src/f{i}.py" for i in range(file_count)],
+                    "base_ref": "main",
+                    "head_sha": "a" * 40,
+                }
+
+            async def post_review(self, *args, **kwargs):
+                return {"id": 1}
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(pipeline, "make_github_client", lambda: FakeClient())
+        monkeypatch.setattr(pipeline, "Desk", StubDesk)
+        await pipeline.run_review_pipeline("owner/repo", 7)
+        return budgets
+
+    async def test_budget_scales_with_file_count(self, monkeypatch, tmp_path):
+        budgets = await self._run_with_files(monkeypatch, tmp_path, 70)
+        assert budgets["max_tool_calls"] == 85
+        assert budgets["max_iterations"] == 95
+
+    async def test_budget_hits_hard_ceiling(self, monkeypatch, tmp_path):
+        budgets = await self._run_with_files(monkeypatch, tmp_path, 400)
+        assert budgets["max_tool_calls"] == 120
+
+    def test_carry_forward_collapses_same_anchor_to_most_severe(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [
+            {"id": 1, "path": "src/old.py", "line": 7, "body": '<img alt="P2 Medium" src="x"> **Noise**'},
+            {"id": 2, "path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'},
+            {"id": 3, "path": "src/old.py", "line": 9, "body": '<img alt="P0 Critical" src="x"> **Worse**'},
+        ]
+
+        carried = _carry_forward_comments(existing, {})
+
+        anchors = [(c["path"], c["line"], c["severity"]) for c in carried]
+        assert anchors == [("src/old.py", 7, "P1"), ("src/old.py", 9, "P0")]
+
+    def test_coverage_counts_whole_diff_when_pr_details_fetched(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_pr_details", arguments={}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py"], "x" * 10_000) == (3, 3)
+
+    def test_coverage_falls_back_to_per_file_when_diff_too_large(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_pr_details", arguments={}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py"], "x" * 80_000) == (1, 3)
+
+
+class TestExtractFileDiffHeaders:
+    def test_added_lines_starting_with_plus_are_preserved(self):
+        from src.tools import extract_file_diff
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,4 +1,5 @@",
+                " base",
+                "+++ weird content line",
+                "+normal add",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+other line",
+            ]
+        )
+
+        out = extract_file_diff(diff, "src/target.py")
+
+        assert "R2 + ++ weird content line" in out
+        assert "R3 + normal add" in out
+        assert "other line" not in out
+
+    def test_removed_lines_starting_with_dashes_are_preserved(self):
+        from src.tools import extract_file_diff
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,4 +1,2 @@",
+                " base",
+                "--- weird removed line",
+                "-normal removal",
+                "--- a/src/other.py",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                "+other",
+            ]
+        )
+
+        out = extract_file_diff(diff, "src/target.py")
+
+        assert "L2 - -- weird removed line" in out
+        assert "other" not in out

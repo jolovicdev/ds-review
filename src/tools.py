@@ -5,7 +5,16 @@ from blackgeorge.tools import tool
 from src.github_client import GitHubClient
 
 
-def _extract_file_diff(diff: str, target_path: str) -> str:
+def _is_file_header(line: str) -> bool:
+    """True only for real unified-diff file headers.
+
+    Added or removed source lines can legitimately start with ++ or --, so a
+    bare +++/--- prefix check would truncate the extraction mid-file.
+    """
+    return line.startswith(("diff --git ", "--- a/", "+++ b/", "--- /dev/null", "+++ /dev/null"))
+
+
+def extract_file_diff(diff: str, target_path: str) -> str:
     lines = diff.split("\n")
     result = []
     in_target = False
@@ -17,7 +26,7 @@ def _extract_file_diff(diff: str, target_path: str) -> str:
             result.append(f"--- {target_path}")
             continue
         if in_target:
-            if line.startswith("diff ") or (line.startswith("--- ") and not line.startswith("--- /dev/null")):
+            if _is_file_header(line):
                 break
             if line.startswith("@@"):
                 match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
@@ -25,10 +34,10 @@ def _extract_file_diff(diff: str, target_path: str) -> str:
                     old_line = int(match.group(1))
                     new_line = int(match.group(2))
                 result.append(line)
-            elif line.startswith("+") and not line.startswith("+++"):
+            elif line.startswith("+"):
                 result.append(f"R{new_line} + {line[1:]}")
                 new_line += 1
-            elif line.startswith("-") and not line.startswith("---"):
+            elif line.startswith("-"):
                 result.append(f"L{old_line} - {line[1:]}")
                 old_line += 1
             elif line.startswith(" "):
@@ -93,7 +102,7 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
         diff = _state.get("diff", "")
         if not diff:
             return "Error: fetch_pr_details must be called first to load the PR diff."
-        hunks = _extract_file_diff(diff, path)
+        hunks = extract_file_diff(diff, path)
         return hunks if hunks else f"No diff hunks found for {path}."
 
     @tool(description="Find files that import or reference a target file. Returns up to 5 related files.")
@@ -118,21 +127,6 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
     async def fetch_recent_related_prs(repo_full_name: str, changed_files: list[str]) -> str:
         return await client.get_recent_prs(repo_full_name, changed_files, token)
 
-    @tool(description="Post a PR review with summary and inline comments to GitHub.")
-    async def post_review(repo_full_name: str, pr_number: int, summary: str, comments: list) -> dict:
-        clean = [{"path": c["path"], "line": c.get("line", 1), "side": "RIGHT", "body": c["body"]} for c in comments]
-        return await client.post_review(repo_full_name, pr_number, summary, clean, token)
-
-    @tool(description="Create a GitHub Check Run with review conclusion. conclusion: success/neutral/failure")
-    async def create_check_run(
-        repo_full_name: str, pr_number: int, head_sha: str, summary: str, conclusion: str
-    ) -> dict:
-        return await client.create_check_run(repo_full_name, pr_number, head_sha, summary, conclusion, token)
-
-    @tool(description="Auto-approve PR when no critical or high-severity issues found")
-    async def approve_pr(repo_full_name: str, pr_number: int) -> dict:
-        return await client.approve_pr(repo_full_name, pr_number, token)
-
     return [
         fetch_pr_details,
         fetch_changed_file,
@@ -140,7 +134,4 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
         fetch_related_files,
         fetch_repo_guidelines,
         fetch_recent_related_prs,
-        post_review,
-        create_check_run,
-        approve_pr,
     ]

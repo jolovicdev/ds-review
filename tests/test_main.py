@@ -124,7 +124,10 @@ async def test_review_coordinator_runs_one_review_per_pr_and_replays_latest():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_requeues_when_reviewed_head_is_stale(monkeypatch):
+async def test_dispatch_requeues_when_reviewed_head_is_stale(monkeypatch, tmp_path):
+    from src import persistent_state as ps
+
+    monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
     fake = FakeReactionClient()
     monkeypatch.setattr(main, "make_github_client", lambda: fake)
 
@@ -154,3 +157,42 @@ async def test_dispatch_requeues_when_reviewed_head_is_stale(monkeypatch):
 
     assert coordinator.calls == [("owner/repo", 7, 42)]
     assert ("delete_issue_reaction", "owner/repo", 7, 789, "token") in fake.calls
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stops_requeueing_after_cap(monkeypatch, tmp_path):
+    from src import persistent_state as ps
+
+    monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
+    fake = FakeReactionClient()
+    monkeypatch.setattr(main, "make_github_client", lambda: fake)
+
+    async def fake_pipeline(*args, **kwargs):
+        return {
+            "stale": True,
+            "reason": "head_changed",
+            "reviewed_head": "old-sha",
+            "current_head": "new-sha",
+        }
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.calls = []
+
+        async def enqueue(self, repo, pr_number, installation_id):
+            self.calls.append((repo, pr_number, installation_id))
+            return 2
+
+    coordinator = FakeCoordinator()
+    monkeypatch.setattr(main, "run_review_pipeline", fake_pipeline)
+    monkeypatch.setattr(main, "review_coordinator", coordinator)
+    monkeypatch.setattr(main, "save_pending_review", lambda repo, pr_number, installation_id: None)
+
+    await main._dispatch_review("owner/repo", 7, 42, lambda: True)
+    assert len(coordinator.calls) == 1
+
+    ps.note_requeue("owner/repo", 7)
+    ps.note_requeue("owner/repo", 7)
+
+    await main._dispatch_review("owner/repo", 7, 42, lambda: True)
+    assert coordinator.calls == [("owner/repo", 7, 42)]
