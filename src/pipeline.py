@@ -41,6 +41,7 @@ INLINE_MARKER = "<!-- ds-review-inline -->"
 ACTIONABLE_MARKERS = {"P0", "P1", "P2"}
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 MAX_REVIEW_TOOL_CALLS = 120
+FULL_DIFF_COVERED_CHARS = 50_000
 REPLY_DIFF_CONTEXT_CAP = 20_000
 IsCurrent = Callable[[], bool]
 
@@ -107,10 +108,17 @@ def _carry_forward_comments(existing_comments: list[dict], retouched_files: set[
     return list(by_anchor.values())
 
 
-def _context_file_coverage(report, changed_files: list[str]) -> tuple[int, int] | None:
-    """How many changed files the context collector actually fetched per-file diffs for."""
+def _context_file_coverage(report, changed_files: list[str], full_diff: str = "") -> tuple[int, int] | None:
+    """How many changed files the reviewers actually saw changes for.
+
+    A fetched PR details result carries the whole diff, so when that call
+    happened and the diff is small enough to have survived intact, every
+    changed file was covered. Otherwise count per-file diff fetches.
+    """
     if not changed_files:
         return None
+    if any(tc.name == "fetch_pr_details" for tc in report.tool_calls) and len(full_diff) <= FULL_DIFF_COVERED_CHARS:
+        return len(changed_files), len(changed_files)
     fetched = {
         tc.arguments.get("path")
         for tc in report.tool_calls
@@ -538,7 +546,7 @@ async def run_review_pipeline(
             pr_title=pr_data.get("title", ""),
             event=review_event,
             carried_comments=carried_comments,
-            coverage=_context_file_coverage(report, pr_data.get("files", [])),
+            coverage=_context_file_coverage(report, pr_data.get("files", []), review_diff),
             incremental_note=incremental_note,
         )
         if not settings.summary_comment_enabled:

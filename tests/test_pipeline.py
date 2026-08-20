@@ -795,3 +795,31 @@ class TestDeskBudgetScaling:
 
         anchors = [(c["path"], c["line"], c["severity"]) for c in carried]
         assert anchors == [("src/old.py", 7, "P1"), ("src/old.py", 9, "P0")]
+
+    def test_coverage_counts_whole_diff_when_pr_details_fetched(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_pr_details", arguments={}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py"], "x" * 10_000) == (3, 3)
+
+    def test_coverage_falls_back_to_per_file_when_diff_too_large(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_pr_details", arguments={}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py"], "x" * 80_000) == (1, 3)
