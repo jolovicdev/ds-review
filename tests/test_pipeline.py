@@ -560,3 +560,31 @@ class TestDeskLifecycle:
 
         assert result is None
         assert closed == [True]
+
+
+class TestSummaryVerdictMatchesEvent:
+    def _summary(self, event=None):
+        comments = [
+            {"path": "a.py", "line": 3, "severity": "critical", "title": "t", "details": "d", "body": ""}
+        ]
+        kwargs = {
+            "generated_summary": "s",
+            "comments": comments,
+            "unanchored_comments": [],
+            "pr_title": "P",
+        }
+        if event is not None:
+            kwargs["event"] = event
+        return build_review_summary(**kwargs)
+
+    def test_default_event_requests_changes(self):
+        assert "Request changes - 1 actionable finding" in self._summary()
+
+    def test_downgraded_event_renders_comment_verdict(self):
+        body = self._summary(event="COMMENT")
+        assert "Comment - 1 actionable finding, highest severity P0." in body
+        assert "Request changes" not in body
+
+    def test_low_priority_findings_still_render_comment(self):
+        body = self._summary(event="COMMENT")
+        assert "low-priority" not in body

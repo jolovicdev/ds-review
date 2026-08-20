@@ -91,6 +91,7 @@ def build_review_summary(
     comments: list[dict],
     unanchored_comments: list[dict],
     pr_title: str,
+    event: str = "REQUEST_CHANGES",
 ) -> str:
     all_comments = comments + unanchored_comments
     if not all_comments:
@@ -115,7 +116,7 @@ def build_review_summary(
     )
     highest = severity_marker(sorted_comments[0].get("severity"), sorted_comments[0].get("body", ""))
     alert = "[!IMPORTANT]" if highest in {"P0", "P1", "P2"} else "[!WARNING]"
-    verdict = verdict_line(highest, len(sorted_comments))
+    verdict = verdict_line(highest, len(sorted_comments), event)
 
     lines = [
         "## PR Review",
@@ -350,10 +351,12 @@ def summary_pr_line(summary: str) -> str:
     return "Review completed."
 
 
-def verdict_line(highest: str, count: int) -> str:
+def verdict_line(highest: str, count: int, event: str = "REQUEST_CHANGES") -> str:
     noun = "finding" if count == 1 else "findings"
-    if highest in {"P0", "P1", "P2"}:
+    if highest in {"P0", "P1", "P2"} and event == "REQUEST_CHANGES":
         return f"Request changes - {count} actionable {noun}, highest severity {highest}."
+    if highest in {"P0", "P1", "P2"}:
+        return f"Comment - {count} actionable {noun}, highest severity {highest}."
     return f"Comment - {count} low-priority {noun}."
 
 

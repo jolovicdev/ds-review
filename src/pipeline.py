@@ -423,6 +423,7 @@ async def run_review_pipeline(
             comments=summary_comments,
             unanchored_comments=unanchored_comments,
             pr_title=pr_data.get("title", ""),
+            event=review_event,
         )
         if not settings.summary_comment_enabled:
             review_body = "DS-Review completed."
