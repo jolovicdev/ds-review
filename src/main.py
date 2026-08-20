@@ -12,13 +12,20 @@ from gidgethub import sansio
 from src.client_factory import make_github_client
 from src.config import settings
 from src.logging_config import configure_logging
-from src.persistent_state import clear_pending, get_pending_reviews, save_pending_review
+from src.persistent_state import (
+    clear_pending,
+    get_pending_reviews,
+    note_requeue,
+    save_pending_review,
+)
 from src.pipeline import _is_recheck_request, handle_comment_reply, run_review_pipeline
 from src.review_queue import IsCurrent, ReviewCoordinator
 from src.trigger_policy import issue_comment_can_trigger_review, review_comment_can_trigger_reply
 
 configure_logging()
 logger = logging.getLogger("ds-review")
+
+REQUEUE_LIMIT = 3
 
 
 async def replay_pending_reviews():
@@ -95,7 +102,16 @@ async def _dispatch_review(repo: str, pr_number: int, installation_id: int, is_c
                 str(result.get("current_head", ""))[:12],
             )
             save_pending_review(repo, pr_number, installation_id)
-            await review_coordinator.enqueue(repo, pr_number, installation_id)
+            requeues = note_requeue(repo, pr_number)
+            if requeues <= REQUEUE_LIMIT:
+                await review_coordinator.enqueue(repo, pr_number, installation_id)
+            else:
+                logger.warning(
+                    "Requeue cap reached repo=%s pr=%d after %d stale attempts; waiting for next webhook",
+                    repo,
+                    pr_number,
+                    requeues,
+                )
     except Exception:
         logger.exception(f"Pipeline failed for {repo}#{pr_number}")
     finally:

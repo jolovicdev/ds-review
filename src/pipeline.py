@@ -336,7 +336,10 @@ async def run_review_pipeline(
     try:
         flow_started = time.perf_counter()
         logger.info("Flow started repo=%s pr=%d head=%s", repo_full_name, pr_number, head_sha[:12])
-        report = await flow.arun(initial_job)
+        try:
+            report = await flow.arun(initial_job)
+        finally:
+            desk.close()
         logger.info(
             "Flow completed repo=%s pr=%d status=%s duration_ms=%d",
             repo_full_name,
@@ -402,6 +405,18 @@ async def run_review_pipeline(
 
         published_comments = summary_comments + unanchored_comments
         review_event = _review_event(published_comments)
+
+        own_pr = False
+        try:
+            bot_login = await client.get_bot_username(token)
+        except Exception:
+            bot_login = ""
+            logger.warning("Failed to resolve bot username for own-PR check")
+        author_login = pr_data.get("author_login", "")
+        own_pr = bool(bot_login) and bot_login == author_login
+        if own_pr and review_event == "REQUEST_CHANGES":
+            logger.info("Downgrading review event to COMMENT: token user authored %s#%d", repo_full_name, pr_number)
+        review_event = _effective_review_event(review_event, bot_login, author_login)
 
         review_body = build_review_summary(
             generated_summary=summary,
@@ -536,7 +551,7 @@ async def run_review_pipeline(
                 except Exception as e:
                     logger.warning(f"Clean-review reaction failed (non-fatal): {e}")
 
-            should_approve = settings.auto_approve_enabled
+            should_approve = settings.auto_approve_enabled and not own_pr
             if should_approve and settings.auto_approve_no_critical and has_critical:
                 should_approve = False
             if should_approve and settings.auto_approve_no_high and has_high:
@@ -679,6 +694,13 @@ def _is_actionable_comment(comment: dict) -> bool:
 
 def _review_event(comments: list[dict]) -> str:
     return "REQUEST_CHANGES" if any(_is_actionable_comment(c) for c in comments) else "COMMENT"
+
+
+def _effective_review_event(review_event: str, bot_login: str, author_login: str) -> str:
+    """GitHub rejects REQUEST_CHANGES when the reviewing token user authored the PR."""
+    if review_event == "REQUEST_CHANGES" and bot_login and bot_login == author_login:
+        return "COMMENT"
+    return review_event
 
 
 def _check_run_conclusion(comments: list[dict], fail_on: list[str] | None = None) -> str:
@@ -1027,7 +1049,10 @@ async def handle_comment_reply(
         )
 
         try:
-            report = await desk.arun(responder, job)
+            try:
+                report = await desk.arun(responder, job)
+            finally:
+                desk.close()
             response_body = _reply_body_from_report(report)
             if len(response_body) > 2000:
                 response_body = response_body[:1997] + "..."

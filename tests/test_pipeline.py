@@ -491,3 +491,72 @@ class FakeHeadClient:
     async def get_pr_details(self, repo, pr_number, token):
         self.calls.append((repo, pr_number, token))
         return {"head_sha": self.head_sha}
+
+
+class TestEffectiveReviewEvent:
+    def test_downgrades_request_changes_on_own_pr(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("REQUEST_CHANGES", "jolovicdev", "jolovicdev") == "COMMENT"
+
+    def test_keeps_request_changes_for_other_authors(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("REQUEST_CHANGES", "jolovicdev", "contributor") == "REQUEST_CHANGES"
+
+    def test_keeps_comment_event_unchanged(self):
+        from src.pipeline import _effective_review_event
+
+        assert _effective_review_event("COMMENT", "jolovicdev", "jolovicdev") == "COMMENT"
+
+
+class TestDeskLifecycle:
+    async def test_desk_is_closed_when_flow_fails(self, monkeypatch, tmp_path):
+        from src import persistent_state as ps
+        from src import pipeline
+
+        monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
+        closed = []
+
+        class StubFlow:
+            async def arun(self, job):
+                raise RuntimeError("flow boom")
+
+        class StubDesk:
+            def __init__(self, **kwargs):
+                pass
+
+            def flow(self, steps, name=None):
+                return StubFlow()
+
+            def close(self):
+                closed.append(True)
+
+        class FakeClient:
+            async def get_token(self, installation_id):
+                return "t"
+
+            async def get_pr_details(self, repo, pr_number, token):
+                return {
+                    "title": "t",
+                    "body": "",
+                    "author_login": "someone",
+                    "diff": "",
+                    "files": [],
+                    "base_ref": "main",
+                    "head_sha": "a" * 40,
+                }
+
+            async def post_review(self, *args, **kwargs):
+                return {"id": 1}
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(pipeline, "make_github_client", lambda: FakeClient())
+        monkeypatch.setattr(pipeline, "Desk", StubDesk)
+
+        result = await pipeline.run_review_pipeline("owner/repo", 7)
+
+        assert result is None
+        assert closed == [True]
