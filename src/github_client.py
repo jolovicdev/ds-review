@@ -642,13 +642,24 @@ class GitHubClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def get_commits_between(self, repo: str, base: str, head: str, token: str) -> list[dict]:
+    async def get_incremental_diff(self, repo: str, base: str, head: str, token: str) -> tuple[str, int]:
+        """Return a unified diff of the changes between two commits and the ahead-by count."""
         resp = await self._client.get(
             f"{GITHUB_API_BASE}/repos/{repo}/compare/{base}...{head}",
             headers=self._auth(token),
         )
         resp.raise_for_status()
-        return resp.json().get("commits", [])
+        data = resp.json()
+        if data.get("diff_truncated"):
+            raise RuntimeError("compare diff truncated")
+        parts = []
+        for entry in data.get("files", []):
+            patch = entry.get("patch")
+            if not patch:
+                continue
+            path = entry["filename"]
+            parts.append(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}")
+        return "\n".join(parts), int(data.get("ahead_by", 0))
 
     def _auth(self, token: str) -> dict:
         return {

@@ -22,7 +22,7 @@ from src.models import (
 )
 from src.persistent_state import get_last_commit, get_review_id, save_review
 from src.review_markdown import build_review_summary, normalize_inline_comment, severity_marker
-from src.tools import make_tools
+from src.tools import extract_file_diff, make_tools
 from src.workers import (
     build_context_collector,
     build_conversation_responder,
@@ -40,6 +40,8 @@ DS_REVIEW_MARKER = "\n\n<!-- ds-review -->"
 INLINE_MARKER = "<!-- ds-review-inline -->"
 ACTIONABLE_MARKERS = {"P0", "P1", "P2"}
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+MAX_REVIEW_TOOL_CALLS = 120
+REPLY_DIFF_CONTEXT_CAP = 20_000
 IsCurrent = Callable[[], bool]
 
 
@@ -60,6 +62,64 @@ def _format_flow_errors(errors) -> str:
     if isinstance(errors, str):
         return errors
     return "; ".join(str(error) for error in errors)
+
+
+def _last_reviewed_commit_from_reviews(reviews: list[dict]) -> str:
+    """Latest submitted review head; empty when DS-Review never reviewed this PR.
+
+    Only reviews carrying DS-Review markers count, so a failed run's generic
+    error comment does not become the incremental base.
+    """
+    submitted = [
+        (r.get("submitted_at") or "", r.get("commit_id") or "")
+        for r in reviews
+        if r.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+        and r.get("commit_id")
+        and (DS_REVIEW_MARKER.strip() in (r.get("body") or "") or INLINE_MARKER in (r.get("body") or ""))
+    ]
+    if not submitted:
+        return ""
+    return max(submitted)[1]
+
+
+def _carry_forward_comments(existing_comments: list[dict], retouched_files: set[str]) -> list[dict]:
+    """Previous inline findings on files this incremental review does not touch again."""
+    carried = []
+    for c in existing_comments:
+        path = c.get("path", "")
+        if not path or path in retouched_files:
+            continue
+        carried.append(
+            {
+                "path": path,
+                "line": c.get("line") or c.get("original_line") or 1,
+                "side": c.get("side", "RIGHT"),
+                "body": c.get("body", ""),
+                "severity": severity_marker(None, c.get("body", "")),
+            }
+        )
+    return carried
+
+
+def _context_file_coverage(report, changed_files: list[str]) -> tuple[int, int] | None:
+    """How many changed files the context collector actually fetched per-file diffs for."""
+    if not changed_files:
+        return None
+    fetched = {
+        tc.arguments.get("path")
+        for tc in report.tool_calls
+        if tc.name in {"fetch_file_diff", "fetch_changed_file"} and isinstance(tc.arguments, dict)
+    }
+    changed = set(changed_files)
+    return len(fetched & changed), len(changed)
+
+
+def _reply_diff_context(diff: str, file_path: str, cap: int = REPLY_DIFF_CONTEXT_CAP) -> str:
+    """Hunks for one file, so rechecks see the relevant diff instead of the first bytes."""
+    hunks = extract_file_diff(diff, file_path)
+    if len(hunks) <= cap:
+        return hunks
+    return hunks[:cap] + "\n... [truncated]"
 
 
 async def _discover_existing_reviews(client: GitHubClient, repo: str, pr_number: int, token: str) -> list[dict]:
@@ -221,17 +281,41 @@ async def run_review_pipeline(
 
     is_stateless = settings.deployment_type == "user"
 
-    if not is_stateless:
+    # Resolve the incremental base: the head we last reviewed.
+    our_reviews: list[dict] = []
+    if is_stateless:
+        our_reviews = await _discover_existing_reviews(client, repo_full_name, pr_number, token)
+        last_sha = _last_reviewed_commit_from_reviews(our_reviews)
+    else:
         last_sha = get_last_commit(repo_full_name, pr_number)
         if last_sha and last_sha == head_sha:
             logger.info(f"Skipping {repo_full_name}#{pr_number} — no new commits")
             await client.close()
             return None
-        if last_sha and head_sha:
-            new_commits = await client.get_commits_between(repo_full_name, last_sha, head_sha, token)
-            logger.info(f"Incremental: {len(new_commits)} new commits for {repo_full_name}#{pr_number}")
 
-    tools = make_tools(client, token, pr_details=pr_data)
+    incremental = False
+    review_diff = pr_data.get("diff", "")
+    incremental_ahead_by = 0
+    if last_sha and last_sha != head_sha:
+        try:
+            review_diff, incremental_ahead_by = await client.get_incremental_diff(
+                repo_full_name, last_sha, head_sha, token
+            )
+            incremental = True
+            logger.info(
+                "Incremental review repo=%s pr=%d base=%s ahead_by=%d diff_chars=%d",
+                repo_full_name,
+                pr_number,
+                last_sha[:12],
+                incremental_ahead_by,
+                len(review_diff),
+            )
+        except Exception:
+            logger.warning("Incremental diff unavailable; reviewing the full diff", exc_info=True)
+            review_diff = pr_data.get("diff", "")
+
+    tool_pr_data = {**pr_data, "diff": review_diff} if incremental else pr_data
+    tools = make_tools(client, token, pr_details=tool_pr_data)
 
     context_collector = build_context_collector(tools)
     hypothesis_generator = build_hypothesis_generator()
@@ -240,11 +324,12 @@ async def run_review_pipeline(
     summarizer = build_summarizer()
     reflector = build_reflector()
 
+    max_tool_calls = min(len(pr_data.get("files", [])) + 15, MAX_REVIEW_TOOL_CALLS)
     desk = Desk(
         model=settings.fast_model,
         temperature=settings.temperature,
-        max_iterations=25,
-        max_tool_calls=30,
+        max_iterations=max_tool_calls + 10,
+        max_tool_calls=max_tool_calls,
         respect_context_window=True,
         max_context_messages=40,
     )
@@ -392,7 +477,7 @@ async def run_review_pipeline(
             for c in comments
         ]
 
-        diff = pr_data.get("diff", "")
+        diff = review_diff
 
         review_comments, summary_comments, unanchored_comments, dropped_comments = _split_review_comments(clean, diff)
         if not settings.inline_comments_enabled:
@@ -402,7 +487,22 @@ async def run_review_pipeline(
         for c in dropped_comments:
             logger.warning(f"Dropping finding for {c['path']}:{c['line']} - not publishable")
 
-        published_comments = summary_comments + unanchored_comments
+        carried_comments: list[dict] = []
+        if incremental:
+            try:
+                if is_stateless:
+                    our_review_ids = {r["id"] for r in our_reviews}
+                else:
+                    existing_state_review_id = get_review_id(repo_full_name, pr_number)
+                    our_review_ids = {existing_state_review_id} if existing_state_review_id else set()
+                our_inline = await _get_our_review_comments(client, repo_full_name, pr_number, our_review_ids, token)
+                carried_comments = _carry_forward_comments(our_inline, set(_parse_diff_changed_lines(diff)))
+                for c in carried_comments:
+                    logger.info(f"Carrying forward finding {c['path']}:{c['line']}")
+            except Exception:
+                logger.warning("Failed to collect carried-forward findings", exc_info=True)
+
+        published_comments = summary_comments + unanchored_comments + carried_comments
         review_event = _review_event(published_comments)
 
         own_pr = False
@@ -417,12 +517,23 @@ async def run_review_pipeline(
             logger.info("Downgrading review event to COMMENT: token user authored %s#%d", repo_full_name, pr_number)
         review_event = _effective_review_event(review_event, bot_login, author_login)
 
+        incremental_note = None
+        if incremental:
+            carried_text = f", {len(carried_comments)} carried forward" if carried_comments else ""
+            incremental_note = (
+                f"Incremental review of {incremental_ahead_by} new commit(s) since "
+                f"{last_sha[:8]}; findings from earlier commits are still posted as inline comments{carried_text}."
+            )
+
         review_body = build_review_summary(
             generated_summary=summary,
             comments=summary_comments,
             unanchored_comments=unanchored_comments,
             pr_title=pr_data.get("title", ""),
             event=review_event,
+            carried_comments=carried_comments,
+            coverage=_context_file_coverage(report, pr_data.get("files", [])),
+            incremental_note=incremental_note,
         )
         if not settings.summary_comment_enabled:
             review_body = "DS-Review completed."
@@ -441,8 +552,7 @@ async def run_review_pipeline(
             }
 
         if is_stateless:
-            # Stateless: discover previous reviews from GitHub
-            our_reviews = await _discover_existing_reviews(client, repo_full_name, pr_number, token)
+            # Stateless: previous reviews were discovered before the flow ran
             our_review_ids = {r["id"] for r in our_reviews}
             existing_summary_review = None
             for r in our_reviews:
@@ -1011,7 +1121,7 @@ async def handle_comment_reply(
 
         try:
             pr_details = await client.get_pr_details(repo, pr_number, token)
-            diff_context = pr_details.get("diff", "")[:5000]
+            diff_context = _reply_diff_context(pr_details.get("diff", ""), file_path)
             ref = pr_details.get("head_sha", "HEAD")
         except Exception:
             diff_context = "(unavailable)"

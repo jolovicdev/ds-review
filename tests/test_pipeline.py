@@ -588,3 +588,196 @@ class TestSummaryVerdictMatchesEvent:
     def test_low_priority_findings_still_render_comment(self):
         body = self._summary(event="COMMENT")
         assert "low-priority" not in body
+
+
+class TestIncrementalHelpers:
+    def test_last_reviewed_commit_prefers_latest_submitted_marker_review(self):
+        from src.pipeline import INLINE_MARKER, _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {"state": "PENDING", "commit_id": "pending-sha", "submitted_at": "2026-01-03T00:00:00Z", "body": ""},
+            {
+                "state": "COMMENTED",
+                "commit_id": "error-sha",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "body": "Automated PR review encountered an error and could not complete.",
+            },
+            {
+                "state": "COMMENTED",
+                "commit_id": "good-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": f"## DS-Review\n...{INLINE_MARKER}".replace(INLINE_MARKER, "<!-- ds-review -->"),
+            },
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews) == "good-sha"
+
+    def test_last_reviewed_commit_empty_without_our_reviews(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        assert _last_reviewed_commit_from_reviews([]) == ""
+
+    def test_carry_forward_skips_retouched_files_and_parses_severity(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [
+            {"path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**\n\nDetail'},
+            {"path": "src/new.py", "line": 3, "body": '<img alt="P0 Critical" src="x"> **Other**'},
+        ]
+
+        carried = _carry_forward_comments(existing, {"src/new.py"})
+
+        assert [c["path"] for c in carried] == ["src/old.py"]
+        assert carried[0]["severity"] == "P1"
+        assert carried[0]["line"] == 7
+
+    def test_context_file_coverage_counts_fetched_changed_files(self):
+        from types import SimpleNamespace
+
+        from src.pipeline import _context_file_coverage
+
+        report = SimpleNamespace(
+            tool_calls=[
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "a.py"}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "b.py"}, result=None),
+                SimpleNamespace(name="fetch_changed_file", arguments={"path": "c.py"}, result=None),
+                SimpleNamespace(name="fetch_file_diff", arguments={"path": "not_changed.py"}, result=None),
+            ]
+        )
+
+        assert _context_file_coverage(report, ["a.py", "b.py", "c.py", "d.py"]) == (3, 4)
+
+    def test_reply_diff_context_targets_one_file(self):
+        from src.pipeline import _reply_diff_context
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+target line",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+other line",
+            ]
+        )
+
+        context = _reply_diff_context(diff, "src/target.py")
+
+        assert "target line" in context
+        assert "other line" not in context
+
+    def test_reply_diff_context_truncates_huge_hunks(self):
+        from src.pipeline import _reply_diff_context
+
+        diff = "+++ b/big.py\n@@ -1,2 +1,3 @@\n base\n+" + "x" * 40_000
+
+        context = _reply_diff_context(diff, "big.py", cap=500)
+
+        assert len(context) < 600
+        assert context.endswith("... [truncated]")
+
+
+class TestSummaryCoverageAndIncremental:
+    def _summary(self, **extra):
+        comments = [
+            {"path": "a.py", "line": 3, "severity": "critical", "title": "t", "details": "d", "body": ""}
+        ]
+        kwargs = {
+            "generated_summary": "s",
+            "comments": comments,
+            "unanchored_comments": [],
+            "pr_title": "P",
+        }
+        kwargs.update(extra)
+        return build_review_summary(**kwargs)
+
+    def test_partial_coverage_renders_warning(self):
+        body = self._summary(coverage=(24, 70))
+        assert "Context coverage: per-file diffs fetched for 24 of 70 changed files." in body
+
+    def test_full_coverage_renders_no_warning(self):
+        body = self._summary(coverage=(70, 70))
+        assert "Context coverage" not in body
+
+    def test_clean_review_with_partial_coverage_still_warns(self):
+        body = build_review_summary(
+            generated_summary="s",
+            comments=[],
+            unanchored_comments=[],
+            pr_title="P",
+            coverage=(3, 9),
+        )
+        assert "No blocking issues found." in body
+        assert "Context coverage" in body
+
+    def test_incremental_note_and_carried_findings_render(self):
+        carried = [{"path": "old.py", "line": 9, "severity": "high", "body": "**Bug** detail"}]
+        body = self._summary(
+            carried_comments=carried,
+            incremental_note="Incremental review of 2 new commit(s) since abc12345.",
+        )
+
+        assert "> [!NOTE]" in body
+        assert "Incremental review of 2 new commit(s) since abc12345." in body
+        assert "### Findings (2)" in body
+
+
+class TestDeskBudgetScaling:
+    async def _run_with_files(self, monkeypatch, tmp_path, file_count):
+        from src import persistent_state as ps
+        from src import pipeline
+
+        monkeypatch.setattr(ps, "STATE_PATH", tmp_path / "state.json")
+        budgets = {}
+
+        class StubFlow:
+            async def arun(self, job):
+                raise RuntimeError("stop")
+
+        class StubDesk:
+            def __init__(self, **kwargs):
+                budgets["max_tool_calls"] = kwargs["max_tool_calls"]
+                budgets["max_iterations"] = kwargs["max_iterations"]
+
+            def flow(self, steps, name=None):
+                return StubFlow()
+
+            def close(self):
+                pass
+
+        class FakeClient:
+            async def get_token(self, installation_id):
+                return "t"
+
+            async def get_pr_details(self, repo, pr_number, token):
+                return {
+                    "title": "t",
+                    "body": "",
+                    "author_login": "someone",
+                    "diff": "",
+                    "files": [f"src/f{i}.py" for i in range(file_count)],
+                    "base_ref": "main",
+                    "head_sha": "a" * 40,
+                }
+
+            async def post_review(self, *args, **kwargs):
+                return {"id": 1}
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(pipeline, "make_github_client", lambda: FakeClient())
+        monkeypatch.setattr(pipeline, "Desk", StubDesk)
+        await pipeline.run_review_pipeline("owner/repo", 7)
+        return budgets
+
+    async def test_budget_scales_with_file_count(self, monkeypatch, tmp_path):
+        budgets = await self._run_with_files(monkeypatch, tmp_path, 70)
+        assert budgets["max_tool_calls"] == 85
+        assert budgets["max_iterations"] == 95
+
+    async def test_budget_hits_hard_ceiling(self, monkeypatch, tmp_path):
+        budgets = await self._run_with_files(monkeypatch, tmp_path, 400)
+        assert budgets["max_tool_calls"] == 120

@@ -5,7 +5,7 @@ from blackgeorge.tools import tool
 from src.github_client import GitHubClient
 
 
-def _extract_file_diff(diff: str, target_path: str) -> str:
+def extract_file_diff(diff: str, target_path: str) -> str:
     lines = diff.split("\n")
     result = []
     in_target = False
@@ -17,7 +17,11 @@ def _extract_file_diff(diff: str, target_path: str) -> str:
             result.append(f"--- {target_path}")
             continue
         if in_target:
-            if line.startswith("diff ") or (line.startswith("--- ") and not line.startswith("--- /dev/null")):
+            if (
+                line.startswith("diff ")
+                or line.startswith("+++ ")
+                or (line.startswith("--- ") and not line.startswith("--- /dev/null"))
+            ):
                 break
             if line.startswith("@@"):
                 match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
@@ -93,7 +97,7 @@ def make_tools(client: GitHubClient, token: str, pr_details: dict | None = None)
         diff = _state.get("diff", "")
         if not diff:
             return "Error: fetch_pr_details must be called first to load the PR diff."
-        hunks = _extract_file_diff(diff, path)
+        hunks = extract_file_diff(diff, path)
         return hunks if hunks else f"No diff hunks found for {path}."
 
     @tool(description="Find files that import or reference a target file. Returns up to 5 related files.")
