@@ -2,6 +2,7 @@ import base64
 import logging
 import time
 from pathlib import PurePosixPath
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -240,6 +241,7 @@ class GitHubClient:
         return {
             "title": pr["title"],
             "body": pr.get("body") or "",
+            "author_login": pr.get("user", {}).get("login", ""),
             "diff": diff_resp.text,
             "files": files,
             "base_ref": pr["base"]["ref"],
@@ -248,8 +250,9 @@ class GitHubClient:
 
     async def get_file_content(self, repo: str, path: str, ref: str, token: str) -> str | None:
         resp = await self._client.get(
-            f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}?ref={ref}",
+            f"{GITHUB_API_BASE}/repos/{repo}/contents/{quote(path, safe='/')}",
             headers=self._auth(token),
+            params={"ref": ref},
         )
         if resp.status_code != 200:
             return None
