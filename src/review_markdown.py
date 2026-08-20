@@ -119,7 +119,7 @@ def build_review_summary(
     verdict = verdict_line(highest, len(sorted_comments), event)
 
     lines = [
-        "## PR Review",
+        "## DS-Review",
         "",
         f"**PR:** {pr_title or summary_pr_line(generated_summary)}",
         "",

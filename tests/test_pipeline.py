@@ -320,7 +320,7 @@ class TestReviewMarkdown:
             pr_title="fix app crash",
         )
 
-        assert "## PR Review" in summary
+        assert "## DS-Review" in summary
         assert "### Findings (1)" in summary
         assert '<img alt="P1 High"' in summary
         assert "**Handle missing payload before dereferencing it**" in summary
