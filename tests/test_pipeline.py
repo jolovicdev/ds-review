@@ -592,44 +592,115 @@ class TestSummaryVerdictMatchesEvent:
 
 class TestIncrementalHelpers:
     def test_last_reviewed_commit_prefers_latest_submitted_marker_review(self):
-        from src.pipeline import INLINE_MARKER, _last_reviewed_commit_from_reviews
+        from src.pipeline import _last_reviewed_commit_from_reviews
 
         reviews = [
-            {"state": "PENDING", "commit_id": "pending-sha", "submitted_at": "2026-01-03T00:00:00Z", "body": ""},
             {
+                "user": {"login": "ds-review[bot]"},
+                "state": "PENDING",
+                "commit_id": "pending-sha",
+                "submitted_at": "2026-01-03T00:00:00Z",
+                "body": "",
+            },
+            {
+                "user": {"login": "ds-review[bot]"},
                 "state": "COMMENTED",
                 "commit_id": "error-sha",
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "body": "Automated PR review encountered an error and could not complete.",
             },
             {
+                "user": {"login": "ds-review[bot]"},
                 "state": "COMMENTED",
                 "commit_id": "good-sha",
                 "submitted_at": "2026-01-02T00:00:00Z",
-                "body": f"## DS-Review\n...{INLINE_MARKER}".replace(INLINE_MARKER, "<!-- ds-review -->"),
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
             },
         ]
 
-        assert _last_reviewed_commit_from_reviews(reviews) == "good-sha"
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "good-sha"
 
-    def test_last_reviewed_commit_empty_without_our_reviews(self):
+    def test_last_reviewed_commit_ignores_spoofed_marker_from_other_author(self):
         from src.pipeline import _last_reviewed_commit_from_reviews
 
-        assert _last_reviewed_commit_from_reviews([]) == ""
+        reviews = [
+            {
+                "user": {"login": "contributor"},
+                "state": "COMMENTED",
+                "commit_id": "spoofed-sha",
+                "submitted_at": "2026-01-05T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
+            },
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "real-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review -->",
+            },
+        ]
 
-    def test_carry_forward_skips_retouched_files_and_parses_severity(self):
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "real-sha"
+
+    def test_last_reviewed_commit_requires_bot_login(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "<!-- ds-review -->",
+            }
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "") == ""
+
+    def test_last_reviewed_commit_prefers_marker_head_over_stale_commit_id(self):
+        from src.pipeline import _last_reviewed_commit_from_reviews
+
+        reviews = [
+            {
+                "user": {"login": "ds-review[bot]"},
+                "state": "COMMENTED",
+                "commit_id": "first-head-sha",
+                "submitted_at": "2026-01-02T00:00:00Z",
+                "body": "## DS-Review\n...\n\n<!-- ds-review head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+            }
+        ]
+
+        assert _last_reviewed_commit_from_reviews(reviews, "ds-review[bot]") == "a" * 40
+
+    def test_carry_forward_keeps_untouched_anchor_in_retouched_file(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [{"id": 1, "path": "src/both.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'}]
+        changed_lines = {"src/both.py": {"RIGHT": {50: "edited"}, "LEFT": {}}}
+
+        carried = _carry_forward_comments(existing, changed_lines)
+
+        assert [c["path"] for c in carried] == ["src/both.py"]
+
+    def test_carry_forward_drops_finding_whose_anchor_changed(self):
+        from src.pipeline import _carry_forward_comments
+
+        existing = [{"id": 1, "path": "src/both.py", "line": 50, "body": '<img alt="P1 High" src="x"> **Bug**'}]
+        changed_lines = {"src/both.py": {"RIGHT": {50: "edited"}, "LEFT": {}}}
+
+        assert _carry_forward_comments(existing, changed_lines) == []
+
+    def test_carry_forward_skips_resolved_threads(self):
         from src.pipeline import _carry_forward_comments
 
         existing = [
-            {"path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**\n\nDetail'},
-            {"path": "src/new.py", "line": 3, "body": '<img alt="P0 Critical" src="x"> **Other**'},
+            {"id": 11, "path": "src/a.py", "line": 1, "body": '<img alt="P1 High" src="x"> **Fixed**'},
+            {"id": 22, "path": "src/b.py", "line": 2, "body": '<img alt="P2 Medium" src="x"> **Open**'},
         ]
 
-        carried = _carry_forward_comments(existing, {"src/new.py"})
+        carried = _carry_forward_comments(existing, {}, resolved_comment_ids={11})
 
-        assert [c["path"] for c in carried] == ["src/old.py"]
-        assert carried[0]["severity"] == "P1"
-        assert carried[0]["line"] == 7
+        assert [c["path"] for c in carried] == ["src/b.py"]
 
     def test_context_file_coverage_counts_fetched_changed_files(self):
         from types import SimpleNamespace
@@ -786,12 +857,12 @@ class TestDeskBudgetScaling:
         from src.pipeline import _carry_forward_comments
 
         existing = [
-            {"path": "src/old.py", "line": 7, "body": '<img alt="P2 Medium" src="x"> **Noise**'},
-            {"path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'},
-            {"path": "src/old.py", "line": 9, "body": '<img alt="P0 Critical" src="x"> **Worse**'},
+            {"id": 1, "path": "src/old.py", "line": 7, "body": '<img alt="P2 Medium" src="x"> **Noise**'},
+            {"id": 2, "path": "src/old.py", "line": 7, "body": '<img alt="P1 High" src="x"> **Bug**'},
+            {"id": 3, "path": "src/old.py", "line": 9, "body": '<img alt="P0 Critical" src="x"> **Worse**'},
         ]
 
-        carried = _carry_forward_comments(existing, set())
+        carried = _carry_forward_comments(existing, {})
 
         anchors = [(c["path"], c["line"], c["severity"]) for c in carried]
         assert anchors == [("src/old.py", 7, "P1"), ("src/old.py", 9, "P0")]
@@ -823,3 +894,50 @@ class TestDeskBudgetScaling:
         )
 
         assert _context_file_coverage(report, ["a.py", "b.py", "c.py"], "x" * 80_000) == (1, 3)
+
+
+class TestExtractFileDiffHeaders:
+    def test_added_lines_starting_with_plus_are_preserved(self):
+        from src.tools import extract_file_diff
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,4 +1,5 @@",
+                " base",
+                "+++ weird content line",
+                "+normal add",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                " base",
+                "+other line",
+            ]
+        )
+
+        out = extract_file_diff(diff, "src/target.py")
+
+        assert "R2 + ++ weird content line" in out
+        assert "R3 + normal add" in out
+        assert "other line" not in out
+
+    def test_removed_lines_starting_with_dashes_are_preserved(self):
+        from src.tools import extract_file_diff
+
+        diff = "\n".join(
+            [
+                "+++ b/src/target.py",
+                "@@ -1,4 +1,2 @@",
+                " base",
+                "--- weird removed line",
+                "-normal removal",
+                "--- a/src/other.py",
+                "+++ b/src/other.py",
+                "@@ -1,2 +1,3 @@",
+                "+other",
+            ]
+        )
+
+        out = extract_file_diff(diff, "src/target.py")
+
+        assert "L2 - -- weird removed line" in out
+        assert "other" not in out

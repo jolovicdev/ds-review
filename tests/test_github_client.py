@@ -46,8 +46,8 @@ def test_get_incremental_diff_reassembles_parseable_unified_diff():
     from src.pipeline import _parse_diff_changed_lines
 
     payload = {
+            "status": "ahead",
             "ahead_by": 2,
-            "diff_truncated": False,
             "files": [
                 {"filename": "src/app.py", "patch": "@@ -10,3 +10,4 @@\n context\n-old line\n+new line\n+added line"},
                 {"filename": "src/bin.png", "patch": None},
@@ -86,3 +86,48 @@ def test_get_incremental_diff_raises_when_compare_diff_truncated():
         raise AssertionError("expected RuntimeError")
     except RuntimeError:
         pass
+
+
+def test_get_incremental_diff_rejects_non_ahead_comparison():
+    import asyncio
+
+    import httpx
+
+    from src.github_client import GitHubClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = {
+            "status": "diverged",
+            "ahead_by": 2,
+            "behind_by": 4,
+            "files": [{"filename": "a.py", "patch": "@@ -1 +1 @@\n-a\n+b"}],
+        }
+        return httpx.Response(200, json=payload)
+
+    client = GitHubClient(token="t")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        asyncio.run(client.get_incremental_diff("owner/repo", "base", "head", "t"))
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "diverged" in str(exc)
+
+
+def test_get_incremental_diff_rejects_capped_file_list():
+    import asyncio
+
+    import httpx
+
+    from src.github_client import GitHubClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        files = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n-a\n+b"} for i in range(300)]
+        return httpx.Response(200, json={"status": "ahead", "ahead_by": 1, "files": files})
+
+    client = GitHubClient(token="t")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        asyncio.run(client.get_incremental_diff("owner/repo", "base", "head", "t"))
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "300" in str(exc)

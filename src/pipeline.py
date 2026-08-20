@@ -36,7 +36,6 @@ from src.workers import (
 
 logger = logging.getLogger("ds-review")
 
-DS_REVIEW_MARKER = "\n\n<!-- ds-review -->"
 INLINE_MARKER = "<!-- ds-review-inline -->"
 ACTIONABLE_MARKERS = {"P0", "P1", "P2"}
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -65,39 +64,78 @@ def _format_flow_errors(errors) -> str:
     return "; ".join(str(error) for error in errors)
 
 
-def _last_reviewed_commit_from_reviews(reviews: list[dict]) -> str:
-    """Latest submitted review head; empty when DS-Review never reviewed this PR.
+_REVIEW_HEAD_RE = re.compile(r"<!-- ds-review(?: head=([0-9a-f]{6,40}))? -->")
 
-    Only reviews carrying DS-Review markers count, so a failed run's generic
-    error comment does not become the incremental base.
+
+def _has_review_marker(body: str) -> bool:
+    """Matches both the plain marker and the head-carrying form."""
+    return _REVIEW_HEAD_RE.search(body) is not None
+
+
+def _ds_review_marker(head_sha: str) -> str:
+    suffix = f" head={head_sha}" if head_sha else ""
+    return f"\n\n<!-- ds-review{suffix} -->"
+
+
+def _review_head_from_review(review: dict) -> str:
+    """Reviewed head for one of our reviews: the marker head when present, else commit_id.
+
+    update_review only rewrites the body, so a summary updated in place keeps
+    its original commit_id; the marker head records what was actually reviewed.
+    """
+    match = _REVIEW_HEAD_RE.search(review.get("body") or "")
+    if match and match.group(1):
+        return match.group(1)
+    return review.get("commit_id") or ""
+
+
+def _last_reviewed_commit_from_reviews(reviews: list[dict], bot_login: str) -> str:
+    """Latest reviewed head; empty when DS-Review never reviewed this PR.
+
+    Only marker-bearing reviews from the resolved bot login count: a failed
+    run's error comment is not a reviewed head, and neither is a marker
+    spoofed into a review by another author.
     """
     submitted = [
-        (r.get("submitted_at") or "", r.get("commit_id") or "")
+        (r.get("submitted_at") or "", _review_head_from_review(r))
         for r in reviews
-        if r.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
-        and r.get("commit_id")
-        and (DS_REVIEW_MARKER.strip() in (r.get("body") or "") or INLINE_MARKER in (r.get("body") or ""))
+        if bot_login
+        and r.get("user", {}).get("login") == bot_login
+        and r.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+        and (INLINE_MARKER in (r.get("body") or "") or _has_review_marker(r.get("body") or ""))
     ]
-    if not submitted:
+    candidates = [item for item in submitted if item[1]]
+    if not candidates:
         return ""
-    return max(submitted)[1]
+    return max(candidates)[1]
 
 
-def _carry_forward_comments(existing_comments: list[dict], retouched_files: set[str]) -> list[dict]:
-    """Previous inline findings on files this incremental review does not touch again.
+def _carry_forward_comments(
+    existing_comments: list[dict],
+    incremental_changed_lines: dict[str, dict[str, dict[int, str]]],
+    resolved_comment_ids: set[int] | None = None,
+) -> list[dict]:
+    """Previous inline findings whose anchored code this incremental review does not change.
 
-    Near-duplicate comments that earlier runs left on the same anchor are
-    collapsed to the most severe one.
+    A finding survives unless the incremental diff changed its anchored line
+    (that line is in the new hunks, so the reviewers re-judge it) or its
+    thread was resolved. Near-duplicate comments that earlier runs left on
+    the same anchor are collapsed to the most severe one.
     """
+    resolved = resolved_comment_ids or set()
     by_anchor: dict[tuple[str, int, str], dict] = {}
     for c in existing_comments:
+        if c.get("id") in resolved:
+            continue
         path = c.get("path", "")
-        if not path or path in retouched_files:
+        line = c.get("line") or c.get("original_line") or 1
+        side = c.get("side", "RIGHT")
+        if not path or line in incremental_changed_lines.get(path, {}).get(side, {}):
             continue
         entry = {
             "path": path,
-            "line": c.get("line") or c.get("original_line") or 1,
-            "side": c.get("side", "RIGHT"),
+            "line": line,
+            "side": side,
             "body": c.get("body", ""),
             "severity": severity_marker(None, c.get("body", "")),
         }
@@ -157,7 +195,7 @@ async def _discover_existing_reviews(client: GitHubClient, repo: str, pr_number:
         login = user.get("login", "")
         if bot_login and login == bot_login:
             our_reviews.append(r)
-        elif DS_REVIEW_MARKER.strip() in body or INLINE_MARKER in body or "DS-Review" in body:
+        elif not bot_login and (INLINE_MARKER in body or _has_review_marker(body) or "DS-Review" in body):
             our_reviews.append(r)
     return our_reviews
 
@@ -297,9 +335,14 @@ async def run_review_pipeline(
 
     # Resolve the incremental base: the head we last reviewed.
     our_reviews: list[dict] = []
+    bot_login = ""
+    try:
+        bot_login = await client.get_bot_username(token)
+    except Exception:
+        logger.warning("Failed to resolve bot username")
     if is_stateless:
         our_reviews = await _discover_existing_reviews(client, repo_full_name, pr_number, token)
-        last_sha = _last_reviewed_commit_from_reviews(our_reviews)
+        last_sha = _last_reviewed_commit_from_reviews(our_reviews, bot_login)
     else:
         last_sha = get_last_commit(repo_full_name, pr_number)
         if last_sha and last_sha == head_sha:
@@ -510,7 +553,12 @@ async def run_review_pipeline(
                     existing_state_review_id = get_review_id(repo_full_name, pr_number)
                     our_review_ids = {existing_state_review_id} if existing_state_review_id else set()
                 our_inline = await _get_our_review_comments(client, repo_full_name, pr_number, our_review_ids, token)
-                carried_comments = _carry_forward_comments(our_inline, set(_parse_diff_changed_lines(diff)))
+                try:
+                    resolved_ids = await client.get_resolved_comment_ids(repo_full_name, pr_number, token)
+                except Exception:
+                    logger.warning("Failed to list resolved threads; carrying unresolved history", exc_info=True)
+                    resolved_ids = set()
+                carried_comments = _carry_forward_comments(our_inline, _parse_diff_changed_lines(diff), resolved_ids)
                 for c in carried_comments:
                     logger.info(f"Carrying forward finding {c['path']}:{c['line']}")
             except Exception:
@@ -519,17 +567,10 @@ async def run_review_pipeline(
         published_comments = summary_comments + unanchored_comments + carried_comments
         review_event = _review_event(published_comments)
 
-        own_pr = False
-        try:
-            bot_login = await client.get_bot_username(token)
-        except Exception:
-            bot_login = ""
-            logger.warning("Failed to resolve bot username for own-PR check")
-        author_login = pr_data.get("author_login", "")
-        own_pr = bool(bot_login) and bot_login == author_login
+        own_pr = bool(bot_login) and bot_login == pr_data.get("author_login", "")
         if own_pr and review_event == "REQUEST_CHANGES":
             logger.info("Downgrading review event to COMMENT: token user authored %s#%d", repo_full_name, pr_number)
-        review_event = _effective_review_event(review_event, bot_login, author_login)
+        review_event = _effective_review_event(review_event, bot_login, pr_data.get("author_login", ""))
 
         incremental_note = None
         if incremental:
@@ -551,7 +592,7 @@ async def run_review_pipeline(
         )
         if not settings.summary_comment_enabled:
             review_body = "DS-Review completed."
-        review_body += DS_REVIEW_MARKER
+        review_body += _ds_review_marker(head_sha)
 
         head_status = await _review_head_status(client, repo_full_name, pr_number, token, head_sha, is_current)
         if not head_status.current:
@@ -571,7 +612,7 @@ async def run_review_pipeline(
             existing_summary_review = None
             for r in our_reviews:
                 body = r.get("body", "")
-                if DS_REVIEW_MARKER.strip() in body or ("DS-Review" in body and INLINE_MARKER not in body):
+                if _has_review_marker(body) or ("DS-Review" in body and INLINE_MARKER not in body):
                     existing_summary_review = r
                     break
 

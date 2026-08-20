@@ -445,9 +445,7 @@ class GitHubClient:
             raise RuntimeError(f"GitHub GraphQL error: {data['errors']}")
         return data.get("data", {})
 
-    async def find_review_thread(
-        self, repo: str, pr_number: int, comment_id: int, token: str
-    ) -> dict | None:
+    async def _iter_review_threads(self, repo: str, pr_number: int, token: str):
         owner, name = repo.split("/", 1)
         after = None
         query = """
@@ -478,16 +476,36 @@ class GitHubClient:
             pr_data = repo_data.get("pullRequest") or {}
             threads = pr_data.get("reviewThreads") or {}
             for thread in threads.get("nodes", []):
-                comment_ids = [
-                    c.get("databaseId")
-                    for c in thread.get("comments", {}).get("nodes", [])
-                ]
-                if comment_id in comment_ids:
-                    return thread
+                yield thread
             page_info = threads.get("pageInfo", {})
             if not page_info.get("hasNextPage"):
-                return None
+                return
             after = page_info.get("endCursor")
+
+    async def get_resolved_comment_ids(self, repo: str, pr_number: int, token: str) -> set[int]:
+        """Ids of review comments that live in resolved threads."""
+        resolved: set[int] = set()
+        for thread in await self._collect_review_threads(repo, pr_number, token):
+            if thread.get("isResolved"):
+                resolved.update(
+                    c.get("databaseId") for c in thread.get("comments", {}).get("nodes", []) if c.get("databaseId")
+                )
+        return resolved
+
+    async def _collect_review_threads(self, repo: str, pr_number: int, token: str) -> list[dict]:
+        return [thread async for thread in self._iter_review_threads(repo, pr_number, token)]
+
+    async def find_review_thread(
+        self, repo: str, pr_number: int, comment_id: int, token: str
+    ) -> dict | None:
+        for thread in await self._collect_review_threads(repo, pr_number, token):
+            comment_ids = [
+                c.get("databaseId")
+                for c in thread.get("comments", {}).get("nodes", [])
+            ]
+            if comment_id in comment_ids:
+                return thread
+        return None
 
     async def resolve_review_thread(self, repo: str, pr_number: int, comment_id: int, token: str) -> bool:
         thread = await self.find_review_thread(repo, pr_number, comment_id, token)
@@ -643,17 +661,27 @@ class GitHubClient:
         return resp.json()
 
     async def get_incremental_diff(self, repo: str, base: str, head: str, token: str) -> tuple[str, int]:
-        """Return a unified diff of the changes between two commits and the ahead-by count."""
+        """Return a unified diff of the changes between two commits and the ahead-by count.
+
+        Only a strictly ahead comparison describes the commit range; diverged
+        or behind comparisons return a plain tree diff that would review the
+        wrong scope after a rebase or force push. The compare file list is
+        capped at 300 entries with no reliable truncation flag, so a capped
+        list is treated as unusable.
+        """
         resp = await self._client.get(
             f"{GITHUB_API_BASE}/repos/{repo}/compare/{base}...{head}",
             headers=self._auth(token),
         )
         resp.raise_for_status()
         data = resp.json()
-        if data.get("diff_truncated"):
-            raise RuntimeError("compare diff truncated")
+        if data.get("status") != "ahead":
+            raise RuntimeError(f"comparison not strictly ahead: {data.get('status')}")
+        files = data.get("files", [])
+        if len(files) >= 300:
+            raise RuntimeError("compare file list capped at 300 entries")
         parts = []
-        for entry in data.get("files", []):
+        for entry in files:
             patch = entry.get("patch")
             if not patch:
                 continue

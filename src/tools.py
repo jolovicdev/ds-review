@@ -5,6 +5,15 @@ from blackgeorge.tools import tool
 from src.github_client import GitHubClient
 
 
+def _is_file_header(line: str) -> bool:
+    """True only for real unified-diff file headers.
+
+    Added or removed source lines can legitimately start with ++ or --, so a
+    bare +++/--- prefix check would truncate the extraction mid-file.
+    """
+    return line.startswith(("diff --git ", "--- a/", "+++ b/", "--- /dev/null", "+++ /dev/null"))
+
+
 def extract_file_diff(diff: str, target_path: str) -> str:
     lines = diff.split("\n")
     result = []
@@ -17,11 +26,7 @@ def extract_file_diff(diff: str, target_path: str) -> str:
             result.append(f"--- {target_path}")
             continue
         if in_target:
-            if (
-                line.startswith("diff ")
-                or line.startswith("+++ ")
-                or (line.startswith("--- ") and not line.startswith("--- /dev/null"))
-            ):
+            if _is_file_header(line):
                 break
             if line.startswith("@@"):
                 match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
@@ -29,10 +34,10 @@ def extract_file_diff(diff: str, target_path: str) -> str:
                     old_line = int(match.group(1))
                     new_line = int(match.group(2))
                 result.append(line)
-            elif line.startswith("+") and not line.startswith("+++"):
+            elif line.startswith("+"):
                 result.append(f"R{new_line} + {line[1:]}")
                 new_line += 1
-            elif line.startswith("-") and not line.startswith("---"):
+            elif line.startswith("-"):
                 result.append(f"L{old_line} - {line[1:]}")
                 old_line += 1
             elif line.startswith(" "):
